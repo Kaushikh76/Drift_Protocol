@@ -24,10 +24,16 @@ if (!PRIVATE_KEY) {
   throw new Error('PRIVATE_KEY is required in .env file');
 }
 
-// Contract Addresses - Fixed Uniswap router for Sepolia
+// Contract Addresses - Updated with your deployed contracts
 const UNISWAP_V2_ROUTER = '0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008'; // Sepolia Uniswap V2 Router
 const PAYMENT_GATEWAY_ADDRESS = process.env.PAYMENT_GATEWAY_ADDRESS;
 const PAYMENT_PROCESSOR_ADDRESS = process.env.PAYMENT_PROCESSOR_ADDRESS;
+
+// Your deployed pool addresses
+const DEPLOYED_POOLS = {
+  USDC_MCHZ: '0x77F279E0a8140748507FAAf254172285b4B9Ab87',
+  USDT_MCHZ: '0xE7afa9b942B09eBA7B6E1A0180C922B2E962a6c8'
+} as const;
 
 const HYPERLANE_BRIDGE = {
   SEPOLIA_COLLATERAL: '0xeb2a0b7aaaDd23851c08B963C3F4fbe00B897c04',
@@ -35,13 +41,14 @@ const HYPERLANE_BRIDGE = {
 } as const;
 
 const CHILIZ_DEX = '0xFbef475155294d7Ef054f2b79B908c91A9914d82';
+const HYPERLANE_MAILBOX = '0xA6665B1a40EEdBd7BD178DDB9966E9e61662aa00';
 
-// Token Addresses
+// Token Addresses - Updated to match your actual deployments
 const TOKENS = {
   SEPOLIA: {
-    USDC: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
-    USDT: '0x7169D38820dfd117C3FA1f22a697dBA58d90BA06',
-    MCHZ: '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7',
+    USDC: '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8', // Aave test USDC
+    USDT: '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0', // Aave test USDT
+    MCHZ: '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7', // Your deployed mCHZ (from debug output)
     WETH: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14' // Sepolia WETH for routing
   },
   CHILIZ: {
@@ -59,6 +66,14 @@ const TOKENS = {
     NAP: '0x7b57895dfbff9B096BFA75f54Bad64953717a37d',
     ATM: '0xAFdC9d9bD8baA0e0A7d636Ef8d27f28e94aE73c7'
   }
+} as const;
+
+// Token decimals
+const TOKEN_DECIMALS = {
+  USDC: 6,
+  USDT: 6,
+  MCHZ: 18,
+  WETH: 18
 } as const;
 
 // Types (keeping existing types...)
@@ -128,12 +143,15 @@ const UNISWAP_V2_ROUTER_ABI = [
 const UNISWAP_V2_PAIR_ABI = [
   "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "function token0() external view returns (address)",
-  "function token1() external view returns (address)"
+  "function token1() external view returns (address)",
+  "function totalSupply() external view returns (uint256)"
 ];
 
 const ERC20_ABI = [
   "function balanceOf(address account) external view returns (uint256)",
-  "function decimals() external view returns (uint8)"
+  "function decimals() external view returns (uint8)",
+  "function symbol() external view returns (string)",
+  "function name() external view returns (string)"
 ];
 
 const HYPERLANE_WARP_ABI = [
@@ -154,72 +172,181 @@ function getFanTokenAddress(symbol: string): string | undefined {
   return TOKENS.CHILIZ[upperSymbol];
 }
 
-// Fixed Uniswap price calculation with proper routing and TypeScript safety
+function getTokenDecimals(tokenSymbol: string): number {
+  const upperSymbol = tokenSymbol.toUpperCase() as keyof typeof TOKEN_DECIMALS;
+  return TOKEN_DECIMALS[upperSymbol] || 18;
+}
+
+function getPoolAddress(paymentToken: string): string | null {
+  const upperToken = paymentToken.toUpperCase();
+  switch (upperToken) {
+    case 'USDC':
+      return DEPLOYED_POOLS.USDC_MCHZ;
+    case 'USDT':
+      return DEPLOYED_POOLS.USDT_MCHZ;
+    default:
+      return null;
+  }
+}
+
+// Enhanced pool validation using direct pool contract check
+async function validateUniswapPool(paymentToken: string): Promise<{ exists: boolean; reserves?: any; error?: string }> {
+  try {
+    const poolAddress = getPoolAddress(paymentToken);
+    if (!poolAddress) {
+      return { exists: false, error: `No pool deployed for ${paymentToken}/MCHZ` };
+    }
+
+    const pairContract = new ethers.Contract(
+      poolAddress,
+      UNISWAP_V2_PAIR_ABI,
+      sepoliaProvider
+    );
+
+    // Check if the pool has liquidity
+    const [reserves, token0, token1, totalSupply] = await Promise.all([
+      (pairContract as any).getReserves(),
+      (pairContract as any).token0(),
+      (pairContract as any).token1(),
+      (pairContract as any).totalSupply()
+    ]);
+
+    const hasLiquidity = reserves[0] > 0 && reserves[1] > 0 && totalSupply > 0;
+
+    // Get token decimals for proper formatting
+    const token0Decimals = getTokenDecimals(token0);
+    const token1Decimals = getTokenDecimals(token1);
+
+    console.log('🔍 Pool Validation Results:', {
+      poolAddress,
+      token0,
+      token1,
+      token0Decimals,
+      token1Decimals,
+      reserve0: ethers.formatUnits(reserves[0], token0Decimals),
+      reserve1: ethers.formatUnits(reserves[1], token1Decimals),
+      reserve0Raw: reserves[0].toString(),
+      reserve1Raw: reserves[1].toString(),
+      totalSupply: ethers.formatEther(totalSupply),
+      hasLiquidity
+    });
+
+    return {
+      exists: true,
+      reserves: {
+        reserve0: ethers.formatUnits(reserves[0], token0Decimals),
+        reserve1: ethers.formatUnits(reserves[1], token1Decimals),
+        reserve0Raw: reserves[0].toString(),
+        reserve1Raw: reserves[1].toString(),
+        token0,
+        token1,
+        token0Decimals,
+        token1Decimals,
+        totalSupply: ethers.formatEther(totalSupply),
+        hasLiquidity
+      }
+    };
+
+  } catch (error) {
+    console.log(`Pool validation failed for ${paymentToken}/MCHZ:`, error);
+    return { exists: false, error: (error as Error).message };
+  }
+}
+
+// Fixed price calculation using direct pool reserves
 async function getPaymentTokenNeeded(
   paymentToken: string, 
   mchzAmountOut: bigint
 ): Promise<{ amountIn: bigint; route: string }> {
   try {
-    const routerContract = new ethers.Contract(
-      UNISWAP_V2_ROUTER,
-      UNISWAP_V2_ROUTER_ABI,
+    const poolAddress = getPoolAddress(paymentToken);
+    if (!poolAddress) {
+      throw new Error(`No pool found for ${paymentToken}/MCHZ`);
+    }
+
+    const pairContract = new ethers.Contract(
+      poolAddress,
+      UNISWAP_V2_PAIR_ABI,
       sepoliaProvider
     );
+
+    const [reserves, token0, token1] = await Promise.all([
+      (pairContract as any).getReserves(),
+      (pairContract as any).token0(),
+      (pairContract as any).token1()
+    ]);
+
+    // Determine which token is which based on addresses
+    const paymentTokenAddress = paymentToken.toUpperCase() === 'USDC' 
+      ? TOKENS.SEPOLIA.USDC 
+      : TOKENS.SEPOLIA.USDT;
     
-    // Verify contract method exists
-    if (!routerContract.getAmountsIn) {
-      throw new Error('getAmountsIn method not found on router contract');
-    }
-    
-    // First try direct path
-    let path = [paymentToken, TOKENS.SEPOLIA.MCHZ];
-    let route = `${paymentToken} → MCHZ`;
-    
-    try {
-      const amounts = await routerContract.getAmountsIn!(mchzAmountOut, path);
-      return { amountIn: amounts[0] as bigint, route };
-    } catch (directError) {
-      console.log('Direct path failed, trying via WETH...');
-      
-      // Try routing through WETH if direct path fails
-      path = [paymentToken, TOKENS.SEPOLIA.WETH, TOKENS.SEPOLIA.MCHZ];
-      route = `${paymentToken} → WETH → MCHZ`;
-      
-      try {
-        const amounts = await routerContract.getAmountsIn!(mchzAmountOut, path);
-        return { amountIn: amounts[0] as bigint, route };
-      } catch (wethError) {
-        throw new Error(`No liquidity path found for ${paymentToken} → MCHZ. Direct error: ${directError}. WETH route error: ${wethError}`);
+    let paymentTokenReserve: bigint;
+    let mchzReserve: bigint;
+
+    console.log('🔍 Token Analysis:', {
+      token0: token0.toLowerCase(),
+      token1: token1.toLowerCase(),
+      paymentTokenAddress: paymentTokenAddress.toLowerCase(),
+      mchzAddress: TOKENS.SEPOLIA.MCHZ.toLowerCase(),
+      paymentTokenDecimals: getTokenDecimals(paymentTokenAddress),
+      mchzDecimals: getTokenDecimals(TOKENS.SEPOLIA.MCHZ),
+      reserve0: ethers.formatUnits(reserves[0], getTokenDecimals(token0)),
+      reserve1: ethers.formatUnits(reserves[1], getTokenDecimals(token1)),
+      reserve0Raw: reserves[0].toString(),
+      reserve1Raw: reserves[1].toString()
+    });
+
+    if (token0.toLowerCase() === paymentTokenAddress.toLowerCase()) {
+      paymentTokenReserve = reserves[0];
+      mchzReserve = reserves[1];
+      console.log('✅ Payment token is token0, mCHZ is token1');
+    } else if (token1.toLowerCase() === paymentTokenAddress.toLowerCase()) {
+      paymentTokenReserve = reserves[1];
+      mchzReserve = reserves[0];
+      console.log('✅ Payment token is token1, mCHZ is token0');
+    } else {
+      // Try matching by mCHZ address as fallback
+      if (token0.toLowerCase() === TOKENS.SEPOLIA.MCHZ.toLowerCase()) {
+        mchzReserve = reserves[0];
+        paymentTokenReserve = reserves[1];
+        console.log('✅ Matched by mCHZ address - mCHZ is token0');
+      } else if (token1.toLowerCase() === TOKENS.SEPOLIA.MCHZ.toLowerCase()) {
+        mchzReserve = reserves[1];
+        paymentTokenReserve = reserves[0];
+        console.log('✅ Matched by mCHZ address - mCHZ is token1');
+      } else {
+        throw new Error(`Token address mismatch. Expected ${paymentTokenAddress} and ${TOKENS.SEPOLIA.MCHZ}, got ${token0} and ${token1}`);
       }
     }
+
+    // Check if there's sufficient liquidity
+    if (mchzReserve < mchzAmountOut) {
+      throw new Error(`Insufficient MCHZ liquidity. Available: ${ethers.formatEther(mchzReserve)}, Needed: ${ethers.formatEther(mchzAmountOut)}`);
+    }
+
+    // Calculate required payment token using constant product formula
+    // x * y = k, where k = reserve0 * reserve1
+    // amountIn = (amountOut * reserveIn) / (reserveOut - amountOut)
+    const numerator = mchzAmountOut * paymentTokenReserve;
+    const denominator = mchzReserve - mchzAmountOut;
+    
+    if (denominator <= 0) {
+      throw new Error('Insufficient output amount');
+    }
+
+    // Add 0.3% fee (Uniswap V2 fee)
+    const amountInWithoutFee = numerator / denominator;
+    const amountIn = (amountInWithoutFee * BigInt(1000)) / BigInt(997);
+
+    return { 
+      amountIn, 
+      route: `${paymentToken} → MCHZ (Direct Pool: ${poolAddress})` 
+    };
+
   } catch (error) {
     console.error('Error getting payment token needed:', error);
-    throw new Error(`Failed to get Uniswap price: ${error}`);
-  }
-}
-
-// Enhanced pool validation
-async function validateUniswapPool(tokenA: string, tokenB: string): Promise<boolean> {
-  try {
-    const routerContract = new ethers.Contract(
-      UNISWAP_V2_ROUTER,
-      UNISWAP_V2_ROUTER_ABI,
-      sepoliaProvider
-    );
-    
-    if (!routerContract.getAmountsOut) {
-      throw new Error('getAmountsOut method not found on router contract');
-    }
-    
-    // Try a small amount to see if pool exists
-    const testAmount = ethers.parseEther('0.001');
-    const path = [tokenA, tokenB];
-    
-    await routerContract.getAmountsOut!(testAmount, path);
-    return true;
-  } catch (error) {
-    console.log(`Pool validation failed for ${tokenA}/${tokenB}:`, error);
-    return false;
+    throw new Error(`Failed to calculate price: ${error}`);
   }
 }
 
@@ -236,11 +363,11 @@ async function getChilizFanTokenPrice(fanTokenSymbol: string, chzAmount: bigint)
       throw new Error(`Unsupported fan token: ${fanTokenSymbol}`);
     }
     
-    if (!dexContract.getPrice) {
+    if (!(dexContract as any).getPrice) {
       throw new Error('getPrice method not found on DEX contract');
     }
     
-    const fanTokenAmount = await dexContract.getPrice!(fanTokenAddress, chzAmount);
+    const fanTokenAmount = await (dexContract as any).getPrice(fanTokenAddress, chzAmount);
     return fanTokenAmount as bigint;
   } catch (error) {
     console.error('Error getting Chiliz fan token price:', error);
@@ -256,11 +383,11 @@ async function checkHyperlaneBridgeBalance(): Promise<bigint> {
       sepoliaProvider
     );
     
-    if (!collateralContract.balanceOf) {
+    if (!(collateralContract as any).balanceOf) {
       throw new Error('balanceOf method not found on bridge contract');
     }
     
-    const balance = await collateralContract.balanceOf!(HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL);
+    const balance = await (collateralContract as any).balanceOf(HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL);
     return balance as bigint;
   } catch (error) {
     console.error('Error checking Hyperlane bridge balance:', error);
@@ -390,17 +517,20 @@ app.post('/api/quote', async (req, res): Promise<void> => {
       return;
     }
     
-    // Get payment token address
-    const paymentTokenAddress = paymentTokenUpper === 'USDC' 
-      ? TOKENS.SEPOLIA.USDC 
-      : TOKENS.SEPOLIA.USDT;
-    
-    // Step 1: Validate Uniswap pools exist
-    const poolExists = await validateUniswapPool(paymentTokenAddress, TOKENS.SEPOLIA.MCHZ);
-    if (!poolExists) {
+    // Step 1: Validate pool exists and has liquidity
+    const poolValidation = await validateUniswapPool(paymentTokenUpper);
+    if (!poolValidation.exists) {
       res.status(400).json({ 
-        error: `No Uniswap pool found for ${paymentTokenUpper}/MCHZ. You may need to use a different payment token or check if pools are deployed.`,
-        suggestion: 'Try using WETH as an intermediate token or check your pool addresses'
+        error: `Pool validation failed: ${poolValidation.error}`,
+        suggestion: 'Check if your deployed pools have liquidity and are properly configured'
+      });
+      return;
+    }
+    
+    if (!poolValidation.reserves?.hasLiquidity) {
+      res.status(400).json({ 
+        error: `Pool has no liquidity: ${poolValidation.reserves?.reserve0} / ${poolValidation.reserves?.reserve1}`,
+        poolInfo: poolValidation.reserves
       });
       return;
     }
@@ -423,7 +553,7 @@ app.post('/api/quote', async (req, res): Promise<void> => {
     
     // Step 4: Calculate payment token needed for MCHZ
     const { amountIn: paymentTokenNeeded, route } = await getPaymentTokenNeeded(
-      paymentTokenAddress,
+      paymentTokenUpper,
       mchzNeeded
     );
     
@@ -442,8 +572,8 @@ app.post('/api/quote', async (req, res): Promise<void> => {
     // Add 2% slippage protection
     const paymentTokenWithSlippage = (paymentTokenNeeded * BigInt(102)) / BigInt(100);
     
-    // Determine decimals for formatting
-    const decimals = paymentTokenUpper === 'USDC' ? 6 : 6; // Both USDC and USDT use 6 decimals
+    // Get correct decimals for formatting
+    const decimals = getTokenDecimals(paymentTokenUpper);
     
     const quote: PaymentQuote = {
       fanTokenSymbol,
@@ -456,13 +586,23 @@ app.post('/api/quote', async (req, res): Promise<void> => {
       route
     };
     
-    res.json(quote);
+    res.json({
+      ...quote,
+      poolInfo: poolValidation.reserves,
+      debug: {
+        fanTokenAmountForOneCHZ: ethers.formatEther(fanTokenAmountForOneCHZ),
+        chzNeeded: ethers.formatEther(chzNeeded),
+        mchzNeeded: ethers.formatEther(mchzNeeded),
+        paymentTokenNeeded: ethers.formatUnits(paymentTokenNeeded, decimals),
+        paymentTokenWithSlippage: ethers.formatUnits(paymentTokenWithSlippage, decimals)
+      }
+    });
     
   } catch (error) {
     console.error('Quote error:', error);
     res.status(500).json({ 
       error: (error as Error).message,
-      suggestion: 'Check if Uniswap pools are deployed and have liquidity'
+      suggestion: 'Check if pools have sufficient liquidity and contracts are deployed correctly'
     });
   }
 });
@@ -568,19 +708,46 @@ app.get('/api/bridge-balance', async (req, res) => {
   }
 });
 
+// Debug endpoint for token decimals
+app.get('/api/debug/decimals/:address', async (req, res): Promise<void> => {
+  try {
+    const { address } = req.params;
+    const decimals = getTokenDecimals(address);
+    
+    res.json({
+      input: address,
+      normalized: address.toLowerCase(),
+      decimals,
+      expectedAddresses: {
+        aaveUSDC: '0x94a9d9ac8a22534e3faca9f4e7f2e2cf85d5e4c8',
+        aaveUSDT: '0xaa8e23fb1079ea71e0a56f48a2aa51851d8433d0',
+        mchz: '0xda1fe1db9b04a810cbb214a294667833e4c8d8f7'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 // Pool validation endpoint for debugging
 app.get('/api/validate-pools', async (req, res): Promise<void> => {
   try {
-    const results = {
-      usdcMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDC, TOKENS.SEPOLIA.MCHZ),
-      usdtMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDT, TOKENS.SEPOLIA.MCHZ),
-      usdcWeth: await validateUniswapPool(TOKENS.SEPOLIA.USDC, TOKENS.SEPOLIA.WETH),
-      usdtWeth: await validateUniswapPool(TOKENS.SEPOLIA.USDT, TOKENS.SEPOLIA.WETH),
-      wethMchz: await validateUniswapPool(TOKENS.SEPOLIA.WETH, TOKENS.SEPOLIA.MCHZ)
-    };
+    const [usdcValidation, usdtValidation] = await Promise.all([
+      validateUniswapPool('USDC'),
+      validateUniswapPool('USDT')
+    ]);
     
     res.json({
-      poolValidation: results,
+      pools: {
+        USDC_MCHZ: {
+          address: DEPLOYED_POOLS.USDC_MCHZ,
+          validation: usdcValidation
+        },
+        USDT_MCHZ: {
+          address: DEPLOYED_POOLS.USDT_MCHZ,
+          validation: usdtValidation
+        }
+      },
       addresses: {
         router: UNISWAP_V2_ROUTER,
         tokens: TOKENS.SEPOLIA
@@ -603,11 +770,11 @@ app.get('/api/fan-token-prices', async (req, res): Promise<void> => {
       chilizProvider
     );
     
-    if (!dexContract.getAllPrices) {
+    if (!(dexContract as any).getAllPrices) {
       throw new Error('getAllPrices method not found on DEX contract');
     }
     
-    const prices = await dexContract.getAllPrices!(chzAmountWei);
+    const prices = await (dexContract as any).getAllPrices(chzAmountWei);
     
     const fanTokenPrices: FanTokenPrices = {
       PSG: ethers.formatEther(prices[0]),
@@ -644,10 +811,10 @@ app.get('/api/health', async (req, res): Promise<void> => {
     ]);
     
     // Test pool validations
-    const poolValidation = {
-      usdcMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDC, TOKENS.SEPOLIA.MCHZ),
-      usdtMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDT, TOKENS.SEPOLIA.MCHZ)
-    };
+    const [usdcValidation, usdtValidation] = await Promise.all([
+      validateUniswapPool('USDC'),
+      validateUniswapPool('USDT')
+    ]);
     
     const healthData = {
       status: 'healthy',
@@ -671,7 +838,11 @@ app.get('/api/health', async (req, res): Promise<void> => {
         hyperlaneBridge: HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL,
         chilizDex: CHILIZ_DEX
       },
-      pools: poolValidation,
+      pools: {
+        USDC_MCHZ: usdcValidation,
+        USDT_MCHZ: usdtValidation
+      },
+      deployedPools: DEPLOYED_POOLS,
       tokens: TOKENS
     };
     
@@ -689,17 +860,17 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Cross-chain payment gateway running on port ${PORT}`);
   console.log('🔧 Fixed Issues:');
-  console.log('  ✅ Updated Uniswap router address for Sepolia');
-  console.log('  ✅ Fixed price calculation logic');
-  console.log('  ✅ Added pool validation');
-  console.log('  ✅ Enhanced error handling');
+  console.log('  ✅ Fixed pool validation to use deployed pool addresses');
+  console.log('  ✅ Fixed price calculation using pool reserves');
+  console.log('  ✅ Added proper decimal handling for USDC/USDT');
+  console.log('  ✅ Enhanced error handling and debugging');
   console.log('🌐 Endpoints:');
   console.log('- POST /api/quote - Get payment quote');
   console.log('- POST /api/create-payment - Create payment intent');
   console.log('- GET /api/payment-status/:id - Get payment status');
   console.log('- GET /api/bridge-balance - Check bridge balance');
   console.log('- GET /api/fan-token-prices - Get all fan token prices');
-  console.log('- GET /api/validate-pools - Validate Uniswap pools');
+  console.log('- GET /api/validate-pools - Validate deployed pools');
   console.log('- GET /api/health - Enhanced health check');
   console.log('- POST /api/webhook/* - Event webhooks');
 });
