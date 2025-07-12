@@ -71,8 +71,11 @@ export interface PaymentGatewayInterface extends Interface {
       | "getQuote"
       | "messageToPaymentId"
       | "owner"
+      | "paymentProcessor"
       | "payments"
+      | "poolExists"
       | "renounceOwnership"
+      | "setPaymentProcessor"
       | "transferOwnership"
       | "withdrawETH"
       | "withdrawToken"
@@ -112,10 +115,22 @@ export interface PaymentGatewayInterface extends Interface {
     values: [BytesLike]
   ): string;
   encodeFunctionData(functionFragment: "owner", values?: undefined): string;
+  encodeFunctionData(
+    functionFragment: "paymentProcessor",
+    values?: undefined
+  ): string;
   encodeFunctionData(functionFragment: "payments", values: [string]): string;
+  encodeFunctionData(
+    functionFragment: "poolExists",
+    values: [AddressLike, AddressLike]
+  ): string;
   encodeFunctionData(
     functionFragment: "renounceOwnership",
     values?: undefined
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setPaymentProcessor",
+    values: [AddressLike]
   ): string;
   encodeFunctionData(
     functionFragment: "transferOwnership",
@@ -145,9 +160,18 @@ export interface PaymentGatewayInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "owner", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "paymentProcessor",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(functionFragment: "payments", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "poolExists", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "renounceOwnership",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "setPaymentProcessor",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -316,14 +340,16 @@ export interface PaymentGateway extends BaseContract {
   >;
 
   getQuote: TypedContractMethod<
-    [paymentToken: AddressLike, mchzAmount: BigNumberish],
-    [bigint],
+    [paymentToken: AddressLike, mchzAmountOut: BigNumberish],
+    [[bigint, boolean] & { paymentTokenNeeded: bigint; useWethRoute: boolean }],
     "view"
   >;
 
   messageToPaymentId: TypedContractMethod<[arg0: BytesLike], [string], "view">;
 
   owner: TypedContractMethod<[], [string], "view">;
+
+  paymentProcessor: TypedContractMethod<[], [string], "view">;
 
   payments: TypedContractMethod<
     [arg0: string],
@@ -355,7 +381,19 @@ export interface PaymentGateway extends BaseContract {
     "view"
   >;
 
+  poolExists: TypedContractMethod<
+    [tokenA: AddressLike, tokenB: AddressLike],
+    [boolean],
+    "view"
+  >;
+
   renounceOwnership: TypedContractMethod<[], [void], "nonpayable">;
+
+  setPaymentProcessor: TypedContractMethod<
+    [_paymentProcessor: AddressLike],
+    [void],
+    "nonpayable"
+  >;
 
   transferOwnership: TypedContractMethod<
     [newOwner: AddressLike],
@@ -407,8 +445,8 @@ export interface PaymentGateway extends BaseContract {
   getFunction(
     nameOrSignature: "getQuote"
   ): TypedContractMethod<
-    [paymentToken: AddressLike, mchzAmount: BigNumberish],
-    [bigint],
+    [paymentToken: AddressLike, mchzAmountOut: BigNumberish],
+    [[bigint, boolean] & { paymentTokenNeeded: bigint; useWethRoute: boolean }],
     "view"
   >;
   getFunction(
@@ -416,6 +454,9 @@ export interface PaymentGateway extends BaseContract {
   ): TypedContractMethod<[arg0: BytesLike], [string], "view">;
   getFunction(
     nameOrSignature: "owner"
+  ): TypedContractMethod<[], [string], "view">;
+  getFunction(
+    nameOrSignature: "paymentProcessor"
   ): TypedContractMethod<[], [string], "view">;
   getFunction(
     nameOrSignature: "payments"
@@ -449,8 +490,22 @@ export interface PaymentGateway extends BaseContract {
     "view"
   >;
   getFunction(
+    nameOrSignature: "poolExists"
+  ): TypedContractMethod<
+    [tokenA: AddressLike, tokenB: AddressLike],
+    [boolean],
+    "view"
+  >;
+  getFunction(
     nameOrSignature: "renounceOwnership"
   ): TypedContractMethod<[], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "setPaymentProcessor"
+  ): TypedContractMethod<
+    [_paymentProcessor: AddressLike],
+    [void],
+    "nonpayable"
+  >;
   getFunction(
     nameOrSignature: "transferOwnership"
   ): TypedContractMethod<[newOwner: AddressLike], [void], "nonpayable">;

@@ -3,7 +3,6 @@ import cors from 'cors';
 import { ethers } from 'ethers';
 import axios from 'axios';
 import dotenv from 'dotenv';
-// import { EventListenerService } from './EventListenerService';
 
 dotenv.config();
 
@@ -25,8 +24,8 @@ if (!PRIVATE_KEY) {
   throw new Error('PRIVATE_KEY is required in .env file');
 }
 
-// Contract Addresses
-const UNISWAP_V2_ROUTER = '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D';
+// Contract Addresses - Fixed Uniswap router for Sepolia
+const UNISWAP_V2_ROUTER = '0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008'; // Sepolia Uniswap V2 Router
 const PAYMENT_GATEWAY_ADDRESS = process.env.PAYMENT_GATEWAY_ADDRESS;
 const PAYMENT_PROCESSOR_ADDRESS = process.env.PAYMENT_PROCESSOR_ADDRESS;
 
@@ -42,7 +41,8 @@ const TOKENS = {
   SEPOLIA: {
     USDC: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
     USDT: '0x7169D38820dfd117C3FA1f22a697dBA58d90BA06',
-    MCHZ: '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7'
+    MCHZ: '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7',
+    WETH: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14' // Sepolia WETH for routing
   },
   CHILIZ: {
     CHZ: '0x0000000000000000000000000000000000000000',
@@ -61,7 +61,7 @@ const TOKENS = {
   }
 } as const;
 
-// Types
+// Types (keeping existing types...)
 interface PaymentQuote {
   fanTokenSymbol: string;
   fanTokenAmount: number;
@@ -70,6 +70,7 @@ interface PaymentQuote {
   chzNeeded: string;
   bridgeBalance: string;
   slippage: string;
+  route: string;
 }
 
 interface PaymentIntent {
@@ -114,13 +115,25 @@ interface FanTokenPrices {
   ATM: string;
 }
 
-// Initialize providers with Alchemy
+// Initialize providers
 const sepoliaProvider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
 const chilizProvider = new ethers.JsonRpcProvider(CHILIZ_RPC);
 
-// ABI definitions
+// Enhanced ABI definitions
 const UNISWAP_V2_ROUTER_ABI = [
-  "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)"
+  "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)",
+  "function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts)"
+];
+
+const UNISWAP_V2_PAIR_ABI = [
+  "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
+  "function token0() external view returns (address)",
+  "function token1() external view returns (address)"
+];
+
+const ERC20_ABI = [
+  "function balanceOf(address account) external view returns (uint256)",
+  "function decimals() external view returns (uint8)"
 ];
 
 const HYPERLANE_WARP_ABI = [
@@ -132,12 +145,8 @@ const CHILIZ_DEX_ABI = [
   "function getAllPrices(uint chzAmount) external view returns (uint psgTokens, uint barTokens, uint spursTokens, uint acmTokens, uint ogTokens, uint cityTokens, uint afcTokens, uint mengoTokens, uint juvTokens, uint napTokens, uint atmTokens)"
 ];
 
-// Real-time payment tracking using blockchain events
+// Payment tracking
 const payments = new Map<string, PaymentIntent>();
-// const eventListener = new EventListenerService();
-
-// Initialize event listeners (commented out for now)
-// eventListener.startListening().catch(console.error);
 
 // Helper Functions
 function getFanTokenAddress(symbol: string): string | undefined {
@@ -145,7 +154,11 @@ function getFanTokenAddress(symbol: string): string | undefined {
   return TOKENS.CHILIZ[upperSymbol];
 }
 
-async function getUniswapPrice(tokenIn: string, tokenOut: string, amountIn: bigint): Promise<bigint> {
+// Fixed Uniswap price calculation with proper routing and TypeScript safety
+async function getPaymentTokenNeeded(
+  paymentToken: string, 
+  mchzAmountOut: bigint
+): Promise<{ amountIn: bigint; route: string }> {
   try {
     const routerContract = new ethers.Contract(
       UNISWAP_V2_ROUTER,
@@ -153,17 +166,60 @@ async function getUniswapPrice(tokenIn: string, tokenOut: string, amountIn: bigi
       sepoliaProvider
     );
     
-    const path = [tokenIn, tokenOut];
-    const getAmountsOut = routerContract.getAmountsOut;
-    if (!getAmountsOut) {
-      throw new Error('getAmountsOut function not available');
+    // Verify contract method exists
+    if (!routerContract.getAmountsIn) {
+      throw new Error('getAmountsIn method not found on router contract');
     }
     
-    const amounts = await getAmountsOut(amountIn, path);
-    return amounts[1] as bigint;
+    // First try direct path
+    let path = [paymentToken, TOKENS.SEPOLIA.MCHZ];
+    let route = `${paymentToken} → MCHZ`;
+    
+    try {
+      const amounts = await routerContract.getAmountsIn!(mchzAmountOut, path);
+      return { amountIn: amounts[0] as bigint, route };
+    } catch (directError) {
+      console.log('Direct path failed, trying via WETH...');
+      
+      // Try routing through WETH if direct path fails
+      path = [paymentToken, TOKENS.SEPOLIA.WETH, TOKENS.SEPOLIA.MCHZ];
+      route = `${paymentToken} → WETH → MCHZ`;
+      
+      try {
+        const amounts = await routerContract.getAmountsIn!(mchzAmountOut, path);
+        return { amountIn: amounts[0] as bigint, route };
+      } catch (wethError) {
+        throw new Error(`No liquidity path found for ${paymentToken} → MCHZ. Direct error: ${directError}. WETH route error: ${wethError}`);
+      }
+    }
   } catch (error) {
-    console.error('Error getting Uniswap price:', error);
+    console.error('Error getting payment token needed:', error);
     throw new Error(`Failed to get Uniswap price: ${error}`);
+  }
+}
+
+// Enhanced pool validation
+async function validateUniswapPool(tokenA: string, tokenB: string): Promise<boolean> {
+  try {
+    const routerContract = new ethers.Contract(
+      UNISWAP_V2_ROUTER,
+      UNISWAP_V2_ROUTER_ABI,
+      sepoliaProvider
+    );
+    
+    if (!routerContract.getAmountsOut) {
+      throw new Error('getAmountsOut method not found on router contract');
+    }
+    
+    // Try a small amount to see if pool exists
+    const testAmount = ethers.parseEther('0.001');
+    const path = [tokenA, tokenB];
+    
+    await routerContract.getAmountsOut!(testAmount, path);
+    return true;
+  } catch (error) {
+    console.log(`Pool validation failed for ${tokenA}/${tokenB}:`, error);
+    return false;
   }
 }
 
@@ -180,12 +236,11 @@ async function getChilizFanTokenPrice(fanTokenSymbol: string, chzAmount: bigint)
       throw new Error(`Unsupported fan token: ${fanTokenSymbol}`);
     }
     
-    const getPrice = dexContract.getPrice;
-    if (!getPrice) {
-      throw new Error('getPrice function not available');
+    if (!dexContract.getPrice) {
+      throw new Error('getPrice method not found on DEX contract');
     }
     
-    const fanTokenAmount = await getPrice(fanTokenAddress, chzAmount);
+    const fanTokenAmount = await dexContract.getPrice!(fanTokenAddress, chzAmount);
     return fanTokenAmount as bigint;
   } catch (error) {
     console.error('Error getting Chiliz fan token price:', error);
@@ -201,12 +256,11 @@ async function checkHyperlaneBridgeBalance(): Promise<bigint> {
       sepoliaProvider
     );
     
-    const balanceOf = collateralContract.balanceOf;
-    if (!balanceOf) {
-      throw new Error('balanceOf function not available');
+    if (!collateralContract.balanceOf) {
+      throw new Error('balanceOf method not found on bridge contract');
     }
     
-    const balance = await balanceOf(HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL);
+    const balance = await collateralContract.balanceOf!(HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL);
     return balance as bigint;
   } catch (error) {
     console.error('Error checking Hyperlane bridge balance:', error);
@@ -214,7 +268,7 @@ async function checkHyperlaneBridgeBalance(): Promise<bigint> {
   }
 }
 
-// Webhook endpoints for real blockchain event processing
+// Webhook endpoints (keeping existing webhook code...)
 app.post('/api/webhook/payment_initiated', (req, res) => {
   const { data } = req.body;
   console.log('Payment initiated:', data.paymentId);
@@ -320,9 +374,7 @@ app.post('/api/webhook/payment_completed', (req, res) => {
   res.json({ success: true });
 });
 
-// API Routes
-
-// Get quote for payment
+// Fixed quote endpoint
 app.post('/api/quote', async (req, res): Promise<void> => {
   try {
     const { fanTokenSymbol, fanTokenAmount, paymentToken } = req.body;
@@ -332,12 +384,33 @@ app.post('/api/quote', async (req, res): Promise<void> => {
       return;
     }
     
-    // Step 1: Calculate CHZ needed for fan tokens
+    const paymentTokenUpper = paymentToken.toUpperCase();
+    if (paymentTokenUpper !== 'USDC' && paymentTokenUpper !== 'USDT') {
+      res.status(400).json({ error: 'Unsupported payment token. Only USDC and USDT are supported.' });
+      return;
+    }
+    
+    // Get payment token address
+    const paymentTokenAddress = paymentTokenUpper === 'USDC' 
+      ? TOKENS.SEPOLIA.USDC 
+      : TOKENS.SEPOLIA.USDT;
+    
+    // Step 1: Validate Uniswap pools exist
+    const poolExists = await validateUniswapPool(paymentTokenAddress, TOKENS.SEPOLIA.MCHZ);
+    if (!poolExists) {
+      res.status(400).json({ 
+        error: `No Uniswap pool found for ${paymentTokenUpper}/MCHZ. You may need to use a different payment token or check if pools are deployed.`,
+        suggestion: 'Try using WETH as an intermediate token or check your pool addresses'
+      });
+      return;
+    }
+    
+    // Step 2: Calculate CHZ needed for fan tokens
     const chzAmountWei = ethers.parseEther('1');
     const fanTokenAmountForOneCHZ = await getChilizFanTokenPrice(fanTokenSymbol, chzAmountWei);
     
     if (fanTokenAmountForOneCHZ === BigInt(0)) {
-      res.status(400).json({ error: 'No liquidity for this fan token' });
+      res.status(400).json({ error: 'No liquidity for this fan token on Chiliz DEX' });
       return;
     }
     
@@ -345,30 +418,16 @@ app.post('/api/quote', async (req, res): Promise<void> => {
     const fanTokenAmountWei = ethers.parseEther(fanTokenAmount.toString());
     const chzNeeded = (fanTokenAmountWei * chzAmountWei) / fanTokenAmountForOneCHZ;
     
-    // Step 2: Calculate MCHZ needed (1:1 ratio with CHZ)
+    // Step 3: Calculate MCHZ needed (1:1 ratio with CHZ)
     const mchzNeeded = chzNeeded;
     
-    // Step 3: Calculate payment token needed for MCHZ
-    let paymentTokenNeeded: bigint;
+    // Step 4: Calculate payment token needed for MCHZ
+    const { amountIn: paymentTokenNeeded, route } = await getPaymentTokenNeeded(
+      paymentTokenAddress,
+      mchzNeeded
+    );
     
-    if (paymentToken.toUpperCase() === 'USDC') {
-      paymentTokenNeeded = await getUniswapPrice(
-        TOKENS.SEPOLIA.USDC,
-        TOKENS.SEPOLIA.MCHZ,
-        mchzNeeded
-      );
-    } else if (paymentToken.toUpperCase() === 'USDT') {
-      paymentTokenNeeded = await getUniswapPrice(
-        TOKENS.SEPOLIA.USDT,
-        TOKENS.SEPOLIA.MCHZ,
-        mchzNeeded
-      );
-    } else {
-      res.status(400).json({ error: 'Unsupported payment token' });
-      return;
-    }
-    
-    // Step 4: Check bridge balance
+    // Step 5: Check bridge balance
     const bridgeBalance = await checkHyperlaneBridgeBalance();
     
     if (bridgeBalance < mchzNeeded) {
@@ -380,28 +439,35 @@ app.post('/api/quote', async (req, res): Promise<void> => {
       return;
     }
     
-    // Add 1% slippage protection
-    const paymentTokenWithSlippage = (paymentTokenNeeded * BigInt(101)) / BigInt(100);
+    // Add 2% slippage protection
+    const paymentTokenWithSlippage = (paymentTokenNeeded * BigInt(102)) / BigInt(100);
+    
+    // Determine decimals for formatting
+    const decimals = paymentTokenUpper === 'USDC' ? 6 : 6; // Both USDC and USDT use 6 decimals
     
     const quote: PaymentQuote = {
       fanTokenSymbol,
       fanTokenAmount,
-      paymentToken: paymentToken.toUpperCase(),
-      paymentTokenNeeded: ethers.formatUnits(paymentTokenWithSlippage, paymentToken.toUpperCase() === 'USDC' ? 6 : 6),
+      paymentToken: paymentTokenUpper,
+      paymentTokenNeeded: ethers.formatUnits(paymentTokenWithSlippage, decimals),
       chzNeeded: ethers.formatEther(chzNeeded),
       bridgeBalance: ethers.formatEther(bridgeBalance),
-      slippage: '1%'
+      slippage: '2%',
+      route
     };
     
     res.json(quote);
     
   } catch (error) {
     console.error('Quote error:', error);
-    res.status(500).json({ error: (error as Error).message });
+    res.status(500).json({ 
+      error: (error as Error).message,
+      suggestion: 'Check if Uniswap pools are deployed and have liquidity'
+    });
   }
 });
 
-// Create payment intent
+// Create payment intent endpoint
 app.post('/api/create-payment', async (req, res): Promise<void> => {
   try {
     const { 
@@ -477,17 +543,6 @@ app.get('/api/payment-status/:paymentId', async (req, res): Promise<void> => {
       return;
     }
     
-    // Get real-time data from contracts if available
-    if (PAYMENT_GATEWAY_ADDRESS) {
-      try {
-        // Note: Contract integration will be added when EventListenerService is ready
-        console.log('Contract integration ready for:', paymentId);
-        // payment.contractData = contractDetails;
-      } catch (error) {
-        console.log('Could not fetch contract data:', (error as Error).message);
-      }
-    }
-    
     res.json(payment);
     
   } catch (error) {
@@ -513,6 +568,29 @@ app.get('/api/bridge-balance', async (req, res) => {
   }
 });
 
+// Pool validation endpoint for debugging
+app.get('/api/validate-pools', async (req, res): Promise<void> => {
+  try {
+    const results = {
+      usdcMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDC, TOKENS.SEPOLIA.MCHZ),
+      usdtMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDT, TOKENS.SEPOLIA.MCHZ),
+      usdcWeth: await validateUniswapPool(TOKENS.SEPOLIA.USDC, TOKENS.SEPOLIA.WETH),
+      usdtWeth: await validateUniswapPool(TOKENS.SEPOLIA.USDT, TOKENS.SEPOLIA.WETH),
+      wethMchz: await validateUniswapPool(TOKENS.SEPOLIA.WETH, TOKENS.SEPOLIA.MCHZ)
+    };
+    
+    res.json({
+      poolValidation: results,
+      addresses: {
+        router: UNISWAP_V2_ROUTER,
+        tokens: TOKENS.SEPOLIA
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 // Get all fan token prices
 app.get('/api/fan-token-prices', async (req, res): Promise<void> => {
   try {
@@ -525,12 +603,11 @@ app.get('/api/fan-token-prices', async (req, res): Promise<void> => {
       chilizProvider
     );
     
-    const getAllPrices = dexContract.getAllPrices;
-    if (!getAllPrices) {
-      throw new Error('getAllPrices function not available');
+    if (!dexContract.getAllPrices) {
+      throw new Error('getAllPrices method not found on DEX contract');
     }
     
-    const prices = await getAllPrices(chzAmountWei);
+    const prices = await dexContract.getAllPrices!(chzAmountWei);
     
     const fanTokenPrices: FanTokenPrices = {
       PSG: ethers.formatEther(prices[0]),
@@ -557,27 +634,45 @@ app.get('/api/fan-token-prices', async (req, res): Promise<void> => {
   }
 });
 
-// Health check with event listener status
+// Enhanced health check
 app.get('/api/health', async (req, res): Promise<void> => {
   try {
-    // Simplified health check without eventListener methods for now
+    // Test RPC connections
+    const [sepoliaBlock, chilizBlock] = await Promise.all([
+      sepoliaProvider.getBlockNumber(),
+      chilizProvider.getBlockNumber()
+    ]);
+    
+    // Test pool validations
+    const poolValidation = {
+      usdcMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDC, TOKENS.SEPOLIA.MCHZ),
+      usdtMchz: await validateUniswapPool(TOKENS.SEPOLIA.USDT, TOKENS.SEPOLIA.MCHZ)
+    };
+    
     const healthData = {
       status: 'healthy',
       timestamp: new Date(),
-      rpcProviders: {
-        sepolia: SEPOLIA_RPC,
-        chiliz: CHILIZ_RPC
-      },
-      services: {
-        sepolia: 'connected',
-        chiliz: 'connected',
-        hyperlane: 'connected',
-        eventListener: 'running'
+      blockchain: {
+        sepolia: {
+          connected: true,
+          latestBlock: sepoliaBlock,
+          rpc: SEPOLIA_RPC.includes('alchemy') ? 'Alchemy' : 'Custom'
+        },
+        chiliz: {
+          connected: true,
+          latestBlock: chilizBlock,
+          rpc: CHILIZ_RPC
+        }
       },
       contracts: {
         paymentGateway: PAYMENT_GATEWAY_ADDRESS || 'not_deployed',
-        paymentProcessor: PAYMENT_PROCESSOR_ADDRESS || 'not_deployed'
-      }
+        paymentProcessor: PAYMENT_PROCESSOR_ADDRESS || 'not_deployed',
+        uniswapRouter: UNISWAP_V2_ROUTER,
+        hyperlaneBridge: HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL,
+        chilizDex: CHILIZ_DEX
+      },
+      pools: poolValidation,
+      tokens: TOKENS
     };
     
     res.json(healthData);
@@ -593,22 +688,25 @@ app.get('/api/health', async (req, res): Promise<void> => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Cross-chain payment gateway running on port ${PORT}`);
-  console.log('Using Alchemy RPC for Sepolia ✅');
-  console.log('Real-time event monitoring active ✅');
-  console.log('Endpoints:');
+  console.log('🔧 Fixed Issues:');
+  console.log('  ✅ Updated Uniswap router address for Sepolia');
+  console.log('  ✅ Fixed price calculation logic');
+  console.log('  ✅ Added pool validation');
+  console.log('  ✅ Enhanced error handling');
+  console.log('🌐 Endpoints:');
   console.log('- POST /api/quote - Get payment quote');
   console.log('- POST /api/create-payment - Create payment intent');
   console.log('- GET /api/payment-status/:id - Get payment status');
   console.log('- GET /api/bridge-balance - Check bridge balance');
   console.log('- GET /api/fan-token-prices - Get all fan token prices');
-  console.log('- GET /api/health - Health check');
+  console.log('- GET /api/validate-pools - Validate Uniswap pools');
+  console.log('- GET /api/health - Enhanced health check');
   console.log('- POST /api/webhook/* - Event webhooks');
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('Shutting down gracefully...');
-  // Simplified shutdown without eventListener.stop() for now
   process.exit(0);
 });
 

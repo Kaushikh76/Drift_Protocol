@@ -23,9 +23,16 @@ import type {
 
 export interface IUniswapV2Router02Interface extends Interface {
   getFunction(
-    nameOrSignature: "getAmountsOut" | "swapExactTokensForTokens"
+    nameOrSignature:
+      | "getAmountsIn"
+      | "getAmountsOut"
+      | "swapExactTokensForTokens"
   ): FunctionFragment;
 
+  encodeFunctionData(
+    functionFragment: "getAmountsIn",
+    values: [BigNumberish, AddressLike[]]
+  ): string;
   encodeFunctionData(
     functionFragment: "getAmountsOut",
     values: [BigNumberish, AddressLike[]]
@@ -41,6 +48,10 @@ export interface IUniswapV2Router02Interface extends Interface {
     ]
   ): string;
 
+  decodeFunctionResult(
+    functionFragment: "getAmountsIn",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(
     functionFragment: "getAmountsOut",
     data: BytesLike
@@ -94,6 +105,12 @@ export interface IUniswapV2Router02 extends BaseContract {
     event?: TCEvent
   ): Promise<this>;
 
+  getAmountsIn: TypedContractMethod<
+    [amountOut: BigNumberish, path: AddressLike[]],
+    [bigint[]],
+    "view"
+  >;
+
   getAmountsOut: TypedContractMethod<
     [amountIn: BigNumberish, path: AddressLike[]],
     [bigint[]],
@@ -116,6 +133,13 @@ export interface IUniswapV2Router02 extends BaseContract {
     key: string | FunctionFragment
   ): T;
 
+  getFunction(
+    nameOrSignature: "getAmountsIn"
+  ): TypedContractMethod<
+    [amountOut: BigNumberish, path: AddressLike[]],
+    [bigint[]],
+    "view"
+  >;
   getFunction(
     nameOrSignature: "getAmountsOut"
   ): TypedContractMethod<
