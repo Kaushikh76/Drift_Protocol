@@ -10,7 +10,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Configuration
+// Production Configuration
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY;
 const SEPOLIA_RPC = `https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
 const CHILIZ_RPC = process.env.CHILIZ_RPC || 'https://spicy-rpc.chiliz.com';
@@ -24,32 +24,37 @@ if (!PRIVATE_KEY) {
   throw new Error('PRIVATE_KEY is required in .env file');
 }
 
-// Contract Addresses - Updated with your deployed contracts
-const UNISWAP_V2_ROUTER = '0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008'; // Sepolia Uniswap V2 Router
+// Production Contract Addresses
+const UNISWAP_V2_ROUTER = '0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3';
 const PAYMENT_GATEWAY_ADDRESS = process.env.PAYMENT_GATEWAY_ADDRESS;
 const PAYMENT_PROCESSOR_ADDRESS = process.env.PAYMENT_PROCESSOR_ADDRESS;
 
-// Your deployed pool addresses
-const DEPLOYED_POOLS = {
-  USDC_MCHZ: '0x77F279E0a8140748507FAAf254172285b4B9Ab87',
-  USDT_MCHZ: '0xE7afa9b942B09eBA7B6E1A0180C922B2E962a6c8'
-} as const;
-
+// Production Hyperlane Addresses (from your deployment)
 const HYPERLANE_BRIDGE = {
   SEPOLIA_COLLATERAL: '0xeb2a0b7aaaDd23851c08B963C3F4fbe00B897c04',
   CHILIZ_NATIVE: '0x286757c8D8f506a756AB00A7eaC22ce1F9ee3F16'
 } as const;
 
-const CHILIZ_DEX = '0xFbef475155294d7Ef054f2b79B908c91A9914d82';
-const HYPERLANE_MAILBOX = '0xA6665B1a40EEdBd7BD178DDB9966E9e61662aa00';
+const HYPERLANE_MAILBOX = {
+  SEPOLIA: '0xA6665B1a40EEdBd7BD178DDB9966E9e61662aa00',
+  CHILIZ: '0xA6665B1a40EEdBd7BD178DDB9966E9e61662aa00'
+} as const;
 
-// Token Addresses - Updated to match your actual deployments
+const CHILIZ_DEX = '0xFbef475155294d7Ef054f2b79B908c91A9914d82';
+
+// Production Pool Addresses
+const DEPLOYED_POOLS = {
+  USDC_MCHZ: '0x77F279E0a8140748507FAAf254172285b4B9Ab87',
+  USDT_MCHZ: '0xE7afa9b942B09eBA7B6E1A0180C922B2E962a6c8'
+} as const;
+
+// Production Token Addresses - Aligned with contracts
 const TOKENS = {
   SEPOLIA: {
     USDC: '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8', // Aave test USDC
     USDT: '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0', // Aave test USDT
-    MCHZ: '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7', // Your deployed mCHZ (from debug output)
-    WETH: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14' // Sepolia WETH for routing
+    MCHZ: '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7', // Your deployed mCHZ
+    WETH: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14'  // Sepolia WETH
   },
   CHILIZ: {
     CHZ: '0x0000000000000000000000000000000000000000',
@@ -68,7 +73,6 @@ const TOKENS = {
   }
 } as const;
 
-// Token decimals
 const TOKEN_DECIMALS = {
   USDC: 6,
   USDT: 6,
@@ -76,7 +80,7 @@ const TOKEN_DECIMALS = {
   WETH: 18
 } as const;
 
-// Types (keeping existing types...)
+// Types
 interface PaymentQuote {
   fanTokenSymbol: string;
   fanTokenAmount: number;
@@ -105,7 +109,6 @@ interface PaymentIntent {
   chzReceived?: string;
   finalFanTokenAmount?: string;
   completedAt?: Date;
-  contractData?: any;
 }
 
 interface PaymentSteps {
@@ -134,7 +137,7 @@ interface FanTokenPrices {
 const sepoliaProvider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
 const chilizProvider = new ethers.JsonRpcProvider(CHILIZ_RPC);
 
-// Enhanced ABI definitions
+// Production ABIs
 const UNISWAP_V2_ROUTER_ABI = [
   "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)",
   "function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts)"
@@ -172,10 +175,36 @@ function getFanTokenAddress(symbol: string): string | undefined {
   return TOKENS.CHILIZ[upperSymbol];
 }
 
-function getTokenDecimals(tokenSymbol: string): number {
-  const upperSymbol = tokenSymbol.toUpperCase() as keyof typeof TOKEN_DECIMALS;
-  return TOKEN_DECIMALS[upperSymbol] || 18;
+function getTokenDecimals(tokenAddress: string): number {
+  // Convert address to lowercase for comparison
+  const lowerAddress = tokenAddress.toLowerCase();
+  
+  // Map token addresses to their decimals
+  const tokenDecimalMap: { [key: string]: number } = {
+    // Sepolia tokens
+    '0x94a9d9ac8a22534e3faca9f4e7f2e2cf85d5e4c8': 6,  // USDC
+    '0xaa8e23fb1079ea71e0a56f48a2aa51851d8433d0': 6,  // USDT
+    '0xda1fe1db9b04a810cbb214a294667833e4c8d8f7': 18, // MCHZ
+    '0xfff9976782d46cc05630d1f6ebab18b2324d6b14': 18, // WETH
+    
+    // Chiliz tokens (all 18 decimals)
+    '0x678c34581db0a7808d0ac669d7025f1408c9a3c6': 18, // WCHZ
+    '0x6d124526a5948cb82bb5b531bf9989d8ab34c899': 18, // PSG
+    '0x0fe14905415e67620bea20528839676684260851': 18, // BAR
+    '0x6199ff3173872e4dd1cf61cd958740a8cf8cae75': 18, // SPURS
+    '0xa34e100d5545d5aa7793e451fa4fdf5dab84c94c': 18, // ACM
+    '0x55922807d03c61de294b8794c25338d3afc0eff6': 18, // OG
+    '0x6350f61cda7baea0efaff15ba10eb7a668e816da': 18, // CITY
+    '0x75a5db3a95d009a493a2a235a62097fd38d93bd4': 18, // AFC
+    '0x8b67d9503b65c9f8d90aa5cad9c25890918e5061': 18, // MENGO
+    '0x141da2e915892d6d6c7584424a64903050ac4226': 18, // JUV
+    '0x7b57895dfbff9b096bfa75f54bad64953717a37d': 18, // NAP
+    '0xafdc9d9bd8baa0e0a7d636ef8d27f28e94ae73c7': 18, // ATM
+  };
+  
+  return tokenDecimalMap[lowerAddress] || 18; // Default to 18 if not found
 }
+
 
 function getPoolAddress(paymentToken: string): string | null {
   const upperToken = paymentToken.toUpperCase();
@@ -189,7 +218,7 @@ function getPoolAddress(paymentToken: string): string | null {
   }
 }
 
-// Enhanced pool validation using direct pool contract check
+// Production pool validation
 async function validateUniswapPool(paymentToken: string): Promise<{ exists: boolean; reserves?: any; error?: string }> {
   try {
     const poolAddress = getPoolAddress(paymentToken);
@@ -203,7 +232,6 @@ async function validateUniswapPool(paymentToken: string): Promise<{ exists: bool
       sepoliaProvider
     );
 
-    // Check if the pool has liquidity
     const [reserves, token0, token1, totalSupply] = await Promise.all([
       (pairContract as any).getReserves(),
       (pairContract as any).token0(),
@@ -213,23 +241,8 @@ async function validateUniswapPool(paymentToken: string): Promise<{ exists: bool
 
     const hasLiquidity = reserves[0] > 0 && reserves[1] > 0 && totalSupply > 0;
 
-    // Get token decimals for proper formatting
     const token0Decimals = getTokenDecimals(token0);
     const token1Decimals = getTokenDecimals(token1);
-
-    console.log('🔍 Pool Validation Results:', {
-      poolAddress,
-      token0,
-      token1,
-      token0Decimals,
-      token1Decimals,
-      reserve0: ethers.formatUnits(reserves[0], token0Decimals),
-      reserve1: ethers.formatUnits(reserves[1], token1Decimals),
-      reserve0Raw: reserves[0].toString(),
-      reserve1Raw: reserves[1].toString(),
-      totalSupply: ethers.formatEther(totalSupply),
-      hasLiquidity
-    });
 
     return {
       exists: true,
@@ -248,12 +261,11 @@ async function validateUniswapPool(paymentToken: string): Promise<{ exists: bool
     };
 
   } catch (error) {
-    console.log(`Pool validation failed for ${paymentToken}/MCHZ:`, error);
     return { exists: false, error: (error as Error).message };
   }
 }
 
-// Fixed price calculation using direct pool reserves
+// Production price calculation
 async function getPaymentTokenNeeded(
   paymentToken: string, 
   mchzAmountOut: bigint
@@ -276,7 +288,6 @@ async function getPaymentTokenNeeded(
       (pairContract as any).token1()
     ]);
 
-    // Determine which token is which based on addresses
     const paymentTokenAddress = paymentToken.toUpperCase() === 'USDC' 
       ? TOKENS.SEPOLIA.USDC 
       : TOKENS.SEPOLIA.USDT;
@@ -284,50 +295,29 @@ async function getPaymentTokenNeeded(
     let paymentTokenReserve: bigint;
     let mchzReserve: bigint;
 
-    console.log('🔍 Token Analysis:', {
-      token0: token0.toLowerCase(),
-      token1: token1.toLowerCase(),
-      paymentTokenAddress: paymentTokenAddress.toLowerCase(),
-      mchzAddress: TOKENS.SEPOLIA.MCHZ.toLowerCase(),
-      paymentTokenDecimals: getTokenDecimals(paymentTokenAddress),
-      mchzDecimals: getTokenDecimals(TOKENS.SEPOLIA.MCHZ),
-      reserve0: ethers.formatUnits(reserves[0], getTokenDecimals(token0)),
-      reserve1: ethers.formatUnits(reserves[1], getTokenDecimals(token1)),
-      reserve0Raw: reserves[0].toString(),
-      reserve1Raw: reserves[1].toString()
-    });
-
     if (token0.toLowerCase() === paymentTokenAddress.toLowerCase()) {
       paymentTokenReserve = reserves[0];
       mchzReserve = reserves[1];
-      console.log('✅ Payment token is token0, mCHZ is token1');
     } else if (token1.toLowerCase() === paymentTokenAddress.toLowerCase()) {
       paymentTokenReserve = reserves[1];
       mchzReserve = reserves[0];
-      console.log('✅ Payment token is token1, mCHZ is token0');
     } else {
-      // Try matching by mCHZ address as fallback
       if (token0.toLowerCase() === TOKENS.SEPOLIA.MCHZ.toLowerCase()) {
         mchzReserve = reserves[0];
         paymentTokenReserve = reserves[1];
-        console.log('✅ Matched by mCHZ address - mCHZ is token0');
       } else if (token1.toLowerCase() === TOKENS.SEPOLIA.MCHZ.toLowerCase()) {
         mchzReserve = reserves[1];
         paymentTokenReserve = reserves[0];
-        console.log('✅ Matched by mCHZ address - mCHZ is token1');
       } else {
-        throw new Error(`Token address mismatch. Expected ${paymentTokenAddress} and ${TOKENS.SEPOLIA.MCHZ}, got ${token0} and ${token1}`);
+        throw new Error(`Token address mismatch`);
       }
     }
 
-    // Check if there's sufficient liquidity
     if (mchzReserve < mchzAmountOut) {
-      throw new Error(`Insufficient MCHZ liquidity. Available: ${ethers.formatEther(mchzReserve)}, Needed: ${ethers.formatEther(mchzAmountOut)}`);
+      throw new Error(`Insufficient MCHZ liquidity`);
     }
 
     // Calculate required payment token using constant product formula
-    // x * y = k, where k = reserve0 * reserve1
-    // amountIn = (amountOut * reserveIn) / (reserveOut - amountOut)
     const numerator = mchzAmountOut * paymentTokenReserve;
     const denominator = mchzReserve - mchzAmountOut;
     
@@ -363,10 +353,6 @@ async function getChilizFanTokenPrice(fanTokenSymbol: string, chzAmount: bigint)
       throw new Error(`Unsupported fan token: ${fanTokenSymbol}`);
     }
     
-    if (!(dexContract as any).getPrice) {
-      throw new Error('getPrice method not found on DEX contract');
-    }
-    
     const fanTokenAmount = await (dexContract as any).getPrice(fanTokenAddress, chzAmount);
     return fanTokenAmount as bigint;
   } catch (error) {
@@ -383,10 +369,6 @@ async function checkHyperlaneBridgeBalance(): Promise<bigint> {
       sepoliaProvider
     );
     
-    if (!(collateralContract as any).balanceOf) {
-      throw new Error('balanceOf method not found on bridge contract');
-    }
-    
     const balance = await (collateralContract as any).balanceOf(HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL);
     return balance as bigint;
   } catch (error) {
@@ -395,7 +377,7 @@ async function checkHyperlaneBridgeBalance(): Promise<bigint> {
   }
 }
 
-// Webhook endpoints (keeping existing webhook code...)
+// Production webhook endpoints
 app.post('/api/webhook/payment_initiated', (req, res) => {
   const { data } = req.body;
   console.log('Payment initiated:', data.paymentId);
@@ -443,15 +425,27 @@ app.post('/api/webhook/bridge_initiated', (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/webhook/hyperlane_message_delivered', (req, res) => {
+app.post('/api/webhook/payment_message_received', (req, res) => {
   const { data } = req.body;
-  console.log('Hyperlane message delivered:', data.paymentId);
+  console.log('Payment message received:', data.paymentId);
   
   const payment = payments.get(data.paymentId);
   if (payment) {
     payment.steps.bridgeTransfer = 'completed';
     payment.steps.fanTokenConversion = 'processing';
-    payment.destinationTxHash = data.destinationTxHash;
+    payments.set(data.paymentId, payment);
+  }
+  
+  res.json({ success: true });
+});
+
+app.post('/api/webhook/payment_tokens_received', (req, res) => {
+  const { data } = req.body;
+  console.log('Payment tokens received:', data.paymentId);
+  
+  const payment = payments.get(data.paymentId);
+  if (payment) {
+    payment.chzReceived = data.chzAmountFormatted;
     payments.set(data.paymentId, payment);
   }
   
@@ -460,11 +454,11 @@ app.post('/api/webhook/hyperlane_message_delivered', (req, res) => {
 
 app.post('/api/webhook/payment_received_chiliz', (req, res) => {
   const { data } = req.body;
-  console.log('Payment received on Chiliz:', data.paymentId);
+  console.log('Payment processing started on Chiliz:', data.paymentId);
   
   const payment = payments.get(data.paymentId);
   if (payment) {
-    payment.chzReceived = data.chzAmountFormatted;
+    payment.steps.fanTokenConversion = 'processing';
     payments.set(data.paymentId, payment);
   }
   
@@ -501,7 +495,7 @@ app.post('/api/webhook/payment_completed', (req, res) => {
   res.json({ success: true });
 });
 
-// Fixed quote endpoint
+// Production quote endpoint
 app.post('/api/quote', async (req, res): Promise<void> => {
   try {
     const { fanTokenSymbol, fanTokenAmount, paymentToken } = req.body;
@@ -517,7 +511,7 @@ app.post('/api/quote', async (req, res): Promise<void> => {
       return;
     }
     
-    // Step 1: Validate pool exists and has liquidity
+    // Validate pool exists and has liquidity
     const poolValidation = await validateUniswapPool(paymentTokenUpper);
     if (!poolValidation.exists) {
       res.status(400).json({ 
@@ -529,13 +523,13 @@ app.post('/api/quote', async (req, res): Promise<void> => {
     
     if (!poolValidation.reserves?.hasLiquidity) {
       res.status(400).json({ 
-        error: `Pool has no liquidity: ${poolValidation.reserves?.reserve0} / ${poolValidation.reserves?.reserve1}`,
+        error: `Pool has no liquidity`,
         poolInfo: poolValidation.reserves
       });
       return;
     }
     
-    // Step 2: Calculate CHZ needed for fan tokens
+    // Calculate CHZ needed for fan tokens
     const chzAmountWei = ethers.parseEther('1');
     const fanTokenAmountForOneCHZ = await getChilizFanTokenPrice(fanTokenSymbol, chzAmountWei);
     
@@ -548,16 +542,16 @@ app.post('/api/quote', async (req, res): Promise<void> => {
     const fanTokenAmountWei = ethers.parseEther(fanTokenAmount.toString());
     const chzNeeded = (fanTokenAmountWei * chzAmountWei) / fanTokenAmountForOneCHZ;
     
-    // Step 3: Calculate MCHZ needed (1:1 ratio with CHZ)
+    // Calculate MCHZ needed (1:1 ratio with CHZ)
     const mchzNeeded = chzNeeded;
     
-    // Step 4: Calculate payment token needed for MCHZ
+    // Calculate payment token needed for MCHZ
     const { amountIn: paymentTokenNeeded, route } = await getPaymentTokenNeeded(
       paymentTokenUpper,
       mchzNeeded
     );
     
-    // Step 5: Check bridge balance
+    // Check bridge balance
     const bridgeBalance = await checkHyperlaneBridgeBalance();
     
     if (bridgeBalance < mchzNeeded) {
@@ -588,14 +582,7 @@ app.post('/api/quote', async (req, res): Promise<void> => {
     
     res.json({
       ...quote,
-      poolInfo: poolValidation.reserves,
-      debug: {
-        fanTokenAmountForOneCHZ: ethers.formatEther(fanTokenAmountForOneCHZ),
-        chzNeeded: ethers.formatEther(chzNeeded),
-        mchzNeeded: ethers.formatEther(mchzNeeded),
-        paymentTokenNeeded: ethers.formatUnits(paymentTokenNeeded, decimals),
-        paymentTokenWithSlippage: ethers.formatUnits(paymentTokenWithSlippage, decimals)
-      }
+      poolInfo: poolValidation.reserves
     });
     
   } catch (error) {
@@ -708,28 +695,7 @@ app.get('/api/bridge-balance', async (req, res) => {
   }
 });
 
-// Debug endpoint for token decimals
-app.get('/api/debug/decimals/:address', async (req, res): Promise<void> => {
-  try {
-    const { address } = req.params;
-    const decimals = getTokenDecimals(address);
-    
-    res.json({
-      input: address,
-      normalized: address.toLowerCase(),
-      decimals,
-      expectedAddresses: {
-        aaveUSDC: '0x94a9d9ac8a22534e3faca9f4e7f2e2cf85d5e4c8',
-        aaveUSDT: '0xaa8e23fb1079ea71e0a56f48a2aa51851d8433d0',
-        mchz: '0xda1fe1db9b04a810cbb214a294667833e4c8d8f7'
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
-  }
-});
-
-// Pool validation endpoint for debugging
+// Pool validation endpoint
 app.get('/api/validate-pools', async (req, res): Promise<void> => {
   try {
     const [usdcValidation, usdtValidation] = await Promise.all([
@@ -770,10 +736,6 @@ app.get('/api/fan-token-prices', async (req, res): Promise<void> => {
       chilizProvider
     );
     
-    if (!(dexContract as any).getAllPrices) {
-      throw new Error('getAllPrices method not found on DEX contract');
-    }
-    
     const prices = await (dexContract as any).getAllPrices(chzAmountWei);
     
     const fanTokenPrices: FanTokenPrices = {
@@ -801,16 +763,14 @@ app.get('/api/fan-token-prices', async (req, res): Promise<void> => {
   }
 });
 
-// Enhanced health check
+// Production health check
 app.get('/api/health', async (req, res): Promise<void> => {
   try {
-    // Test RPC connections
     const [sepoliaBlock, chilizBlock] = await Promise.all([
       sepoliaProvider.getBlockNumber(),
       chilizProvider.getBlockNumber()
     ]);
     
-    // Test pool validations
     const [usdcValidation, usdtValidation] = await Promise.all([
       validateUniswapPool('USDC'),
       validateUniswapPool('USDT')
@@ -823,7 +783,7 @@ app.get('/api/health', async (req, res): Promise<void> => {
         sepolia: {
           connected: true,
           latestBlock: sepoliaBlock,
-          rpc: SEPOLIA_RPC.includes('alchemy') ? 'Alchemy' : 'Custom'
+          rpc: 'Alchemy'
         },
         chiliz: {
           connected: true,
@@ -836,6 +796,7 @@ app.get('/api/health', async (req, res): Promise<void> => {
         paymentProcessor: PAYMENT_PROCESSOR_ADDRESS || 'not_deployed',
         uniswapRouter: UNISWAP_V2_ROUTER,
         hyperlaneBridge: HYPERLANE_BRIDGE.SEPOLIA_COLLATERAL,
+        hyperlaneMailbox: HYPERLANE_MAILBOX.SEPOLIA,
         chilizDex: CHILIZ_DEX
       },
       pools: {
@@ -858,12 +819,10 @@ app.get('/api/health', async (req, res): Promise<void> => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Cross-chain payment gateway running on port ${PORT}`);
-  console.log('🔧 Fixed Issues:');
-  console.log('  ✅ Fixed pool validation to use deployed pool addresses');
-  console.log('  ✅ Fixed price calculation using pool reserves');
-  console.log('  ✅ Added proper decimal handling for USDC/USDT');
-  console.log('  ✅ Enhanced error handling and debugging');
+  console.log(`🚀 Production Payment Gateway running on port ${PORT}`);
+  console.log('✅ All simulation code removed');
+  console.log('✅ Production addresses configured');
+  console.log('✅ Real Hyperlane integration');
   console.log('🌐 Endpoints:');
   console.log('- POST /api/quote - Get payment quote');
   console.log('- POST /api/create-payment - Create payment intent');
@@ -871,7 +830,7 @@ app.listen(PORT, () => {
   console.log('- GET /api/bridge-balance - Check bridge balance');
   console.log('- GET /api/fan-token-prices - Get all fan token prices');
   console.log('- GET /api/validate-pools - Validate deployed pools');
-  console.log('- GET /api/health - Enhanced health check');
+  console.log('- GET /api/health - Production health check');
   console.log('- POST /api/webhook/* - Event webhooks');
 });
 

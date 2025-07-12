@@ -28,7 +28,7 @@
   },
   "include": [
     "src/**/*"
-  ],
+, "contracts", "debug-payment-gateway.js"  ],
   "exclude": [
     "node_modules",
     "dist",

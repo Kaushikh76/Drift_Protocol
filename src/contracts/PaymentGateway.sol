@@ -35,23 +35,31 @@ interface IHyperlaneWarpRoute {
     ) external payable returns (bytes32 messageId);
 }
 
+interface IMailbox {
+    function dispatch(
+        uint32 destination,
+        bytes32 recipient,
+        bytes calldata messageBody
+    ) external returns (bytes32);
+}
+
 contract PaymentGateway is ReentrancyGuard, Ownable {
     
-    constructor() Ownable(msg.sender) {
-        // Initialize with deployer as owner
-    }
-    // Fixed addresses for Sepolia testnet
+    constructor() Ownable(msg.sender) {}
+    
+    // Production addresses from your deployment
     IUniswapV2Router02 constant UNISWAP_ROUTER = IUniswapV2Router02(0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008);
     IHyperlaneWarpRoute constant HYPERLANE_BRIDGE = IHyperlaneWarpRoute(0xeb2a0b7aaaDd23851c08B963C3F4fbe00B897c04);
+    IMailbox constant HYPERLANE_MAILBOX = IMailbox(0xA6665B1a40EEdBd7BD178DDB9966E9e61662aa00);
     
-    // Token addresses for Sepolia
-    address constant USDC = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
-    address constant USDT = 0x7169D38820dfd117C3FA1f22a697dBA58d90BA06;
-    address constant MCHZ = 0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7;
-    address constant WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14; // Sepolia WETH for routing
+    // Token addresses - aligned with your backend
+    address constant USDC = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8; // Aave test USDC
+    address constant USDT = 0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0; // Aave test USDT
+    address constant MCHZ = 0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7; // Your deployed mCHZ
+    address constant WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14; // Sepolia WETH
     
     uint32 constant CHILIZ_DOMAIN = 88882;
-    address public paymentProcessor; // Set this during deployment
+    address public paymentProcessor;
     
     struct Payment {
         string paymentId;
@@ -90,7 +98,6 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         uint256 mchzAmount
     );
     
-    // Add setter for payment processor
     function setPaymentProcessor(address _paymentProcessor) external onlyOwner {
         require(_paymentProcessor != address(0), "Invalid payment processor");
         paymentProcessor = _paymentProcessor;
@@ -150,7 +157,7 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         
         emit SwapCompleted(paymentId, mchzAmount);
         
-        // Step 3: Bridge MCHZ to Chiliz via Hyperlane
+        // Step 3: Send payment message and bridge tokens
         bytes32 messageId = _bridgeToChiliz(paymentId, mchzAmount, merchant, fanToken, fanTokenAmount);
         payments[paymentId].hyperlaneMessageId = messageId;
         messageToPaymentId[messageId] = paymentId;
@@ -163,7 +170,6 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         uint256 paymentAmount,
         uint256 minMchzOut
     ) internal returns (uint256) {
-        // Approve Uniswap router
         require(
             IERC20(paymentToken).approve(address(UNISWAP_ROUTER), paymentAmount),
             "Approval failed"
@@ -177,7 +183,6 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         uint[] memory amounts;
         
         try UNISWAP_ROUTER.getAmountsOut(paymentAmount, path) returns (uint[] memory directAmounts) {
-            // Direct path exists, use it
             amounts = UNISWAP_ROUTER.swapExactTokensForTokens(
                 paymentAmount,
                 minMchzOut,
@@ -186,7 +191,7 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
                 block.timestamp + 300
             );
         } catch {
-            // Direct path failed, try routing through WETH
+            // Fallback to WETH routing
             address[] memory wethPath = new address[](3);
             wethPath[0] = paymentToken;
             wethPath[1] = WETH;
@@ -211,15 +216,28 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         address fanToken,
         uint256 fanTokenAmount
     ) internal returns (bytes32) {
-        // Approve Hyperlane bridge
+        // Encode payment data for message
+        bytes memory messageData = abi.encode(
+            paymentId,
+            merchant,
+            fanToken,
+            fanTokenAmount
+        );
+        
+        // Send payment message first
+        bytes32 messageId = HYPERLANE_MAILBOX.dispatch(
+            CHILIZ_DOMAIN,
+            bytes32(uint256(uint160(paymentProcessor))),
+            messageData
+        );
+        
+        // Then bridge tokens
         require(
             IERC20(MCHZ).approve(address(HYPERLANE_BRIDGE), mchzAmount),
             "Bridge approval failed"
         );
         
-        // Bridge to Chiliz - the payment data will be handled off-chain
-        // The Hyperlane bridge will convert MCHZ to native CHZ on Chiliz
-        bytes32 messageId = HYPERLANE_BRIDGE.transferRemote(
+        HYPERLANE_BRIDGE.transferRemote(
             CHILIZ_DOMAIN,
             bytes32(uint256(uint160(paymentProcessor))),
             mchzAmount
@@ -228,12 +246,10 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         return messageId;
     }
     
-    // Enhanced quote function with routing support
     function getQuote(
         address paymentToken,
         uint256 mchzAmountOut
     ) external view returns (uint256 paymentTokenNeeded, bool useWethRoute) {
-        // Try direct path first
         address[] memory directPath = new address[](2);
         directPath[0] = paymentToken;
         directPath[1] = MCHZ;
@@ -241,7 +257,6 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         try UNISWAP_ROUTER.getAmountsIn(mchzAmountOut, directPath) returns (uint[] memory directAmounts) {
             return (directAmounts[0], false);
         } catch {
-            // Direct path failed, try WETH route
             address[] memory wethPath = new address[](3);
             wethPath[0] = paymentToken;
             wethPath[1] = WETH;
@@ -261,7 +276,6 @@ contract PaymentGateway is ReentrancyGuard, Ownable {
         return payments[paymentId];
     }
     
-    // Check if a pool exists for given tokens
     function poolExists(address tokenA, address tokenB) external view returns (bool) {
         address[] memory path = new address[](2);
         path[0] = tokenA;

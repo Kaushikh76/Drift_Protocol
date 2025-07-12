@@ -15,10 +15,10 @@ contract PaymentProcessor {
     IChilizDex constant CHILIZ_DEX = IChilizDex(0xFbef475155294d7Ef054f2b79B908c91A9914d82);
     address constant WCHZ = 0x678c34581db0a7808d0aC669d7025f1408C9a3C6;
     
-    // Hyperlane configuration
-    address public hyperlaneMailbox;
-    uint32 public sepoliaDomain = 11155111;
-    address public paymentGateway; // Sepolia Payment Gateway address
+    // Production Hyperlane configuration
+    address public constant HYPERLANE_MAILBOX = 0xA6665B1a40EEdBd7BD178DDB9966E9e61662aa00;
+    uint32 public constant SEPOLIA_DOMAIN = 11155111;
+    address public paymentGateway;
     address public owner;
     
     struct ProcessedPayment {
@@ -32,8 +32,20 @@ contract PaymentProcessor {
         uint256 timestamp;
     }
     
+    struct PendingPayment {
+        string paymentId;
+        address merchant;
+        address fanToken;
+        uint256 fanTokenAmount;
+        bool messageReceived;
+        bool tokensReceived;
+        uint256 chzAmount;
+        uint256 timestamp;
+    }
+    
     mapping(string => ProcessedPayment) public processedPayments;
     mapping(bytes32 => bool) public processedMessages;
+    mapping(string => PendingPayment) public pendingPayments;
     
     event PaymentReceived(
         string indexed paymentId,
@@ -60,76 +72,41 @@ contract PaymentProcessor {
         uint256 totalFanTokens
     );
     
+    event PaymentMessageReceived(
+        string indexed paymentId,
+        address merchant,
+        address fanToken,
+        uint256 fanTokenAmount
+    );
+    
+    event PaymentTokensReceived(
+        string indexed paymentId,
+        uint256 chzAmount
+    );
+    
     modifier onlyOwner() {
         require(msg.sender == owner, "Only owner");
         _;
     }
     
     modifier onlyHyperlane() {
-        require(msg.sender == hyperlaneMailbox, "Only Hyperlane mailbox");
+        require(msg.sender == HYPERLANE_MAILBOX, "Only Hyperlane mailbox");
         _;
     }
     
-    constructor(address _hyperlaneMailbox, address _paymentGateway) {
-        require(_hyperlaneMailbox != address(0), "Invalid mailbox address");
+    constructor(address _paymentGateway) {
         require(_paymentGateway != address(0), "Invalid gateway address");
-        
-        hyperlaneMailbox = _hyperlaneMailbox;
         paymentGateway = _paymentGateway;
         owner = msg.sender;
     }
     
-    // Simplified handle function for demo purposes
-    function processPaymentDemo(
-        string memory paymentId,
-        address merchant,
-        address fanToken,
-        uint256 fanTokenAmount
-    ) external payable {
-        require(msg.value > 0, "No CHZ sent");
-        require(bytes(paymentId).length > 0, "Invalid payment ID");
-        require(merchant != address(0), "Invalid merchant");
-        require(fanToken != address(0), "Invalid fan token");
-        require(fanTokenAmount > 0, "Invalid fan token amount");
-        
-        uint256 chzReceived = msg.value;
-        
-        emit PaymentReceived(paymentId, chzReceived);
-        
-        // Store payment details
-        processedPayments[paymentId] = ProcessedPayment({
-            paymentId: paymentId,
-            merchant: merchant,
-            fanToken: fanToken,
-            fanTokenAmount: fanTokenAmount,
-            chzReceived: chzReceived,
-            fanTokensSent: 0,
-            completed: false,
-            timestamp: block.timestamp
-        });
-        
-        // Convert CHZ to fan tokens via Chiliz DEX
-        uint256 fanTokensReceived = _convertToFanTokens(fanToken, chzReceived);
-        
-        emit FanTokenSwapCompleted(paymentId, fanToken, fanTokensReceived);
-        
-        // Send fan tokens to merchant
-        _sendToMerchant(paymentId, merchant, fanToken, fanTokensReceived);
-        
-        // Mark payment as completed
-        processedPayments[paymentId].fanTokensSent = fanTokensReceived;
-        processedPayments[paymentId].completed = true;
-        
-        emit PaymentCompleted(paymentId, merchant, fanToken, fanTokensReceived);
-    }
-    
-    // Original Hyperlane message handler
+    // Hyperlane message handler
     function handle(
         uint32 origin,
         bytes32 sender,
         bytes calldata message
     ) external onlyHyperlane {
-        require(origin == sepoliaDomain, "Invalid origin domain");
+        require(origin == SEPOLIA_DOMAIN, "Invalid origin domain");
         require(address(uint160(uint256(sender))) == paymentGateway, "Invalid sender");
         
         // Decode message
@@ -150,14 +127,65 @@ contract PaymentProcessor {
         require(fanToken != address(0), "Invalid fan token");
         require(fanTokenAmount > 0, "Invalid fan token amount");
         
-        // Get CHZ balance received
-        uint256 chzReceived = address(this).balance;
-        require(chzReceived > 0, "No CHZ received");
+        // Store payment message data
+        PendingPayment storage pending = pendingPayments[paymentId];
+        pending.paymentId = paymentId;
+        pending.merchant = merchant;
+        pending.fanToken = fanToken;
+        pending.fanTokenAmount = fanTokenAmount;
+        pending.messageReceived = true;
+        pending.timestamp = block.timestamp;
         
-        emit PaymentReceived(paymentId, chzReceived);
+        emit PaymentMessageReceived(paymentId, merchant, fanToken, fanTokenAmount);
+        
+        // Try to complete payment if tokens already received
+        _tryCompletePayment(paymentId);
+    }
+    
+    // Function to handle CHZ token reception
+    function processTokenReception(string calldata paymentId) external payable {
+        require(msg.value > 0, "No CHZ sent");
+        require(bytes(paymentId).length > 0, "Invalid payment ID");
+        
+        PendingPayment storage pending = pendingPayments[paymentId];
+        pending.paymentId = paymentId;
+        pending.tokensReceived = true;
+        pending.chzAmount = msg.value;
+        
+        if (pending.timestamp == 0) {
+            pending.timestamp = block.timestamp;
+        }
+        
+        emit PaymentTokensReceived(paymentId, msg.value);
+        
+        // Try to complete payment if message already received
+        _tryCompletePayment(paymentId);
+    }
+    
+    // Internal function to complete payment when both message and tokens received
+    function _tryCompletePayment(string memory paymentId) internal {
+        PendingPayment storage pending = pendingPayments[paymentId];
+        
+        // Only proceed if both message and tokens received
+        if (!pending.messageReceived || !pending.tokensReceived) {
+            return;
+        }
+        
+        require(pending.chzAmount > 0, "No CHZ received");
+        
+        emit PaymentReceived(paymentId, pending.chzAmount);
         
         // Process the payment
-        _processPayment(paymentId, merchant, fanToken, fanTokenAmount, chzReceived);
+        _processPayment(
+            paymentId,
+            pending.merchant,
+            pending.fanToken,
+            pending.fanTokenAmount,
+            pending.chzAmount
+        );
+        
+        // Clean up pending payment
+        delete pendingPayments[paymentId];
     }
     
     function _processPayment(
@@ -240,6 +268,14 @@ contract PaymentProcessor {
         return processedPayments[paymentId];
     }
     
+    function getPendingPayment(string calldata paymentId)
+        external
+        view
+        returns (PendingPayment memory)
+    {
+        return pendingPayments[paymentId];
+    }
+    
     function getFanTokenPrice(address fanToken, uint256 chzAmount) 
         external 
         view 
@@ -248,17 +284,22 @@ contract PaymentProcessor {
         return CHILIZ_DEX.getPrice(fanToken, chzAmount);
     }
     
+    // Check if payment is ready to complete
+    function canCompletePayment(string calldata paymentId) 
+        external 
+        view 
+        returns (bool hasMessage, bool hasTokens, bool canComplete) 
+    {
+        PendingPayment memory pending = pendingPayments[paymentId];
+        hasMessage = pending.messageReceived;
+        hasTokens = pending.tokensReceived;
+        canComplete = hasMessage && hasTokens && pending.chzAmount > 0;
+    }
+    
     // Admin functions
-    function setHyperlaneMailbox(address _mailbox) external onlyOwner {
-        hyperlaneMailbox = _mailbox;
-    }
-    
     function setPaymentGateway(address _gateway) external onlyOwner {
+        require(_gateway != address(0), "Invalid gateway");
         paymentGateway = _gateway;
-    }
-    
-    function setSepoliaDomain(uint32 _domain) external onlyOwner {
-        sepoliaDomain = _domain;
     }
     
     // Emergency functions
@@ -270,13 +311,27 @@ contract PaymentProcessor {
         payable(owner).transfer(address(this).balance);
     }
     
-    // Receive CHZ from Hyperlane bridge or direct payments
+    // Timeout handling - allow cleanup of stale pending payments
+    function cleanupStalePendingPayment(string calldata paymentId) external onlyOwner {
+        PendingPayment storage pending = pendingPayments[paymentId];
+        require(pending.timestamp > 0, "Payment not found");
+        require(block.timestamp > pending.timestamp + 1 hours, "Payment not stale yet");
+        
+        // Refund CHZ if tokens were received but message wasn't
+        if (pending.tokensReceived && !pending.messageReceived && pending.chzAmount > 0) {
+            payable(owner).transfer(pending.chzAmount);
+        }
+        
+        delete pendingPayments[paymentId];
+    }
+    
     receive() external payable {
-        // CHZ received
+        // CHZ received without context - requires manual processing
+        revert("Use processTokenReception with payment ID");
     }
 }
 
-// Fan Token Addresses for easy reference:
+// Production Fan Token Addresses:
 // PSG:   0x6D124526a5948Cb82BB5B531Bf9989D8aB34C899
 // BAR:   0x0fE14905415E67620BeA20528839676684260851  
 // SPURS: 0x6199FF3173872E4dd1CF61cD958740A8CF8CAE75

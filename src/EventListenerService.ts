@@ -70,6 +70,7 @@ export class EventListenerService {
   
   private webhookUrl: string;
   
+  // Production ABIs
   private readonly paymentGatewayABI = [
     "event PaymentInitiated(string indexed paymentId, address indexed user, address indexed merchant, address paymentToken, uint256 paymentAmount, address fanToken, uint256 fanTokenAmount)",
     "event SwapCompleted(string indexed paymentId, uint256 mchzAmount)",
@@ -82,13 +83,24 @@ export class EventListenerService {
     "event FanTokenSwapCompleted(string indexed paymentId, address indexed fanToken, uint256 fanTokenAmount)",
     "event PaymentSentToMerchant(string indexed paymentId, address indexed merchant, address fanToken, uint256 amount)",
     "event PaymentCompleted(string indexed paymentId, address indexed merchant, address fanToken, uint256 totalFanTokens)",
-    "function getProcessedPayment(string calldata paymentId) external view returns (tuple(string paymentId, address merchant, address fanToken, uint256 fanTokenAmount, uint256 chzReceived, uint256 fanTokensSent, bool completed, uint256 timestamp))"
+    "event PaymentMessageReceived(string indexed paymentId, address merchant, address fanToken, uint256 fanTokenAmount)",
+    "event PaymentTokensReceived(string indexed paymentId, uint256 chzAmount)",
+    "function getProcessedPayment(string calldata paymentId) external view returns (tuple(string paymentId, address merchant, address fanToken, uint256 fanTokenAmount, uint256 chzReceived, uint256 fanTokensSent, bool completed, uint256 timestamp))",
+    "function getPendingPayment(string calldata paymentId) external view returns (tuple(string paymentId, address merchant, address fanToken, uint256 fanTokenAmount, bool messageReceived, bool tokensReceived, uint256 chzAmount, uint256 timestamp))"
   ];
   
   private readonly hyperlaneWarpABI = [
     "event SentTransferRemote(uint32 indexed destination, bytes32 indexed recipient, uint256 amount, bytes32 indexed messageId)",
     "event ReceivedTransferRemote(uint32 indexed origin, bytes32 indexed recipient, uint256 amount, bytes32 indexed messageId)"
   ];
+
+  // Production token addresses - aligned with contracts
+  private readonly tokenDecimals: { [key: string]: number } = {
+    '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8': 6, // Aave USDC
+    '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0': 6, // Aave USDT
+    '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7': 18, // mCHZ
+    '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14': 18  // WETH
+  };
 
   constructor() {
     const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY;
@@ -122,7 +134,7 @@ export class EventListenerService {
       this.chilizProvider
     );
     
-    // Your actual deployed Hyperlane bridge addresses
+    // Production Hyperlane bridge addresses from your deployment
     this.hyperlaneWarpSepolia = new ethers.Contract(
       '0xeb2a0b7aaaDd23851c08B963C3F4fbe00B897c04',
       this.hyperlaneWarpABI,
@@ -139,24 +151,15 @@ export class EventListenerService {
   }
   
   async startListening(): Promise<void> {
-    console.log('🚀 Starting enhanced event listeners...');
+    console.log('🚀 Starting production event listeners...');
     
     try {
-      // Test connections first
       await this.testConnections();
-      
-      // Listen to Sepolia Payment Gateway events
       this.listenToSepoliaEvents();
-      
-      // Listen to Chiliz Payment Processor events
       this.listenToChilizEvents();
-      
-      // Listen to Hyperlane bridge events
       this.listenToHyperlaneEvents();
       
       console.log('✅ All event listeners started successfully');
-      
-      // Start health monitoring
       this.startHealthMonitoring();
       
     } catch (error) {
@@ -236,8 +239,7 @@ export class EventListenerService {
             fanToken,
             fanTokenAmount: ethers.formatEther(fanTokenAmount),
             transactionHash: event.log.transactionHash,
-            blockNumber: event.log.blockNumber,
-            gasUsed: event.log.gasUsed
+            blockNumber: event.log.blockNumber
           }
         };
         
@@ -301,7 +303,6 @@ export class EventListenerService {
       }
     });
     
-    // Error handling for contract events
     this.paymentGateway.on('error', (error: any) => {
       console.error('❌ Payment Gateway event error:', error);
     });
@@ -315,14 +316,71 @@ export class EventListenerService {
       return;
     }
     
-    // Payment Received
+    // Payment Message Received
+    this.paymentProcessor.on('PaymentMessageReceived', async (
+      paymentId: string,
+      merchant: string,
+      fanToken: string,
+      fanTokenAmount: bigint,
+      event: any
+    ) => {
+      try {
+        console.log(`📨 Payment Message Received: ${paymentId}`);
+        
+        const payload: WebhookPayload = {
+          eventType: 'payment_message_received',
+          timestamp: new Date().toISOString(),
+          data: {
+            paymentId,
+            merchant,
+            fanToken,
+            fanTokenAmount: ethers.formatEther(fanTokenAmount),
+            transactionHash: event.log.transactionHash,
+            blockNumber: event.log.blockNumber
+          }
+        };
+        
+        await this.sendWebhook('payment_message_received', payload);
+      } catch (error) {
+        console.error('Error handling PaymentMessageReceived event:', error);
+      }
+    });
+    
+    // Payment Tokens Received
+    this.paymentProcessor.on('PaymentTokensReceived', async (
+      paymentId: string,
+      chzAmount: bigint,
+      event: any
+    ) => {
+      try {
+        console.log(`💰 Payment Tokens Received: ${paymentId} - ${ethers.formatEther(chzAmount)} CHZ`);
+        
+        const payload: WebhookPayload = {
+          eventType: 'payment_tokens_received',
+          timestamp: new Date().toISOString(),
+          data: {
+            paymentId,
+            chzAmount: chzAmount.toString(),
+            chzAmountFormatted: ethers.formatEther(chzAmount),
+            transactionHash: event.log.transactionHash,
+            blockNumber: event.log.blockNumber
+          }
+        };
+        
+        await this.sendWebhook('payment_tokens_received', payload);
+      } catch (error) {
+        console.error('Error handling PaymentTokensReceived event:', error);
+      }
+    });
+    
+    // Payment Received (when both message and tokens are processed)
     this.paymentProcessor.on('PaymentReceived', async (
       paymentId: string,
       chzAmount: bigint,
       event: any
     ) => {
       try {
-        console.log(`💰 Payment Received on Chiliz: ${paymentId} - ${ethers.formatEther(chzAmount)} CHZ`);
+        console.log(`💰 Payment Processing Started: ${paymentId} - ${ethers.formatEther(chzAmount)} CHZ`);
         
         const payload: WebhookPayload = {
           eventType: 'payment_received_chiliz',
@@ -431,7 +489,6 @@ export class EventListenerService {
       }
     });
     
-    // Error handling for contract events
     this.paymentProcessor.on('error', (error: any) => {
       console.error('❌ Payment Processor event error:', error);
     });
@@ -500,7 +557,6 @@ export class EventListenerService {
       }
     });
     
-    // Error handling for bridge events
     this.hyperlaneWarpSepolia.on('error', (error: any) => {
       console.error('❌ Hyperlane Sepolia event error:', error);
     });
@@ -544,26 +600,12 @@ export class EventListenerService {
   }
   
   private getTokenDecimals(tokenAddress: string): number {
-    // Return appropriate decimals based on token address
-    const tokenDecimals: { [key: string]: number } = {
-      // Aave test tokens
-      '0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8': 6, // Aave USDC
-      '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0': 6, // Aave USDT
-      // mCHZ token
-      [process.env.MCHZ_TOKEN_ADDRESS || '0xDA1fe1Db9b04a810cbb214a294667833e4c8D8F7']: 18, // mCHZ
-      // Old addresses (keeping for backward compatibility)
-      '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238': 6, // Old USDC
-      '0x7169D38820dfd117C3FA1f22a697dBA58d90BA06': 6, // Old USDT
-      '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14': 18  // WETH
-    };
-    
-    return tokenDecimals[tokenAddress] || 18;
+    return this.tokenDecimals[tokenAddress] || 18;
   }
   
   private startHealthMonitoring(): void {
     console.log('🏥 Starting health monitoring...');
     
-    // Check health every 30 seconds
     setInterval(async () => {
       try {
         await this.performHealthCheck();
@@ -597,17 +639,10 @@ export class EventListenerService {
         timestamp: new Date().toISOString()
       };
       
-      // Send health status to webhook
-      const payload: WebhookPayload = {
-        eventType: 'health_check',
-        timestamp: new Date().toISOString(),
-        data: healthStatus
-      };
-      
       // Only log detailed health info every 5 minutes
       const now = Date.now();
       const lastDetailedLog = (this as any).lastDetailedHealthLog || 0;
-      if (now - lastDetailedLog > 300000) { // 5 minutes
+      if (now - lastDetailedLog > 300000) {
         console.log('💚 Health check passed:', {
           sepolia: sepoliaBlock,
           chiliz: chilizBlock
@@ -713,7 +748,6 @@ export class EventListenerService {
     console.log('🛑 Stopping event listeners...');
     
     try {
-      // Remove all listeners
       this.paymentGateway.removeAllListeners();
       this.paymentProcessor.removeAllListeners();
       this.hyperlaneWarpSepolia.removeAllListeners();
