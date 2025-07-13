@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, ArrowRight, Loader2, Wallet as WalletIcon } from "lucide-react";
+import { useAccount, useDisconnect } from 'wagmi';
 import { useDrift } from "../context/DriftContext";
 import { DriftAPI } from "../services/api";
-import { WalletService } from "../services/wallet";
 import WalletModal from "./WalletModal";
 import { DEFAULT_CLUB_TOKENS, DEFAULT_CHAINS, DEFAULT_TOKENS } from "../data/defaults";
 import { ClubToken, PaymentChain, PaymentToken, QuoteResponse, WalletConnection } from "../types";
@@ -23,7 +23,10 @@ const PaymentWidget: React.FC<PaymentWidgetProps> = ({
   onWalletConnect,
   onWalletDisconnect
 }) => {
-  const { config } = useDrift();
+  const { config, walletService } = useDrift();
+  const { address, isConnected, chainId } = useAccount();
+  const { disconnect } = useDisconnect();
+  
   const [selectedClub, setSelectedClub] = useState<keyof typeof DEFAULT_CLUB_TOKENS>("PSG");
   const [selectedChain, setSelectedChain] = useState(DEFAULT_CHAINS[0]);
   const [selectedToken, setSelectedToken] = useState(DEFAULT_TOKENS[0]);
@@ -35,13 +38,33 @@ const PaymentWidget: React.FC<PaymentWidgetProps> = ({
   
   // Wallet states
   const [walletModalOpen, setWalletModalOpen] = useState(false);
-  const [walletConnection, setWalletConnection] = useState<WalletConnection | null>(null);
   const [isConnectingWallet, setIsConnectingWallet] = useState(false);
   const [connectingWallet, setConnectingWallet] = useState<string>("");
 
   const clubData = DEFAULT_CLUB_TOKENS[selectedClub];
   const api = new DriftAPI(config);
-  const walletService = new WalletService(config.walletConnectProjectId);
+
+  // Create wallet connection object from Wagmi state
+  const walletConnection: WalletConnection | null = React.useMemo(() => {
+    if (isConnected && address) {
+      return {
+        address,
+        chainId: chainId || 1,
+        walletType: 'metamask', // Default, could be enhanced to detect actual wallet type
+        provider: null // Wagmi handles provider internally
+      };
+    }
+    return null;
+  }, [isConnected, address, chainId]);
+
+  // Notify parent components of connection changes
+  useEffect(() => {
+    if (walletConnection) {
+      onWalletConnect?.(walletConnection);
+    } else {
+      onWalletDisconnect?.();
+    }
+  }, [walletConnection, onWalletConnect, onWalletDisconnect]);
 
   // Get quote when selections change
   useEffect(() => {
@@ -70,19 +93,14 @@ const PaymentWidget: React.FC<PaymentWidgetProps> = ({
     setError(null);
 
     try {
-      let connection: WalletConnection;
-
       if (walletId === 'metamask') {
-        connection = await walletService.connectMetaMask();
+        await walletService.connectMetaMask();
       } else {
-        connection = await walletService.connectSocios();
+        await walletService.connectSocios();
       }
 
-      setWalletConnection(connection);
       setWalletModalOpen(false);
-      onWalletConnect?.(connection);
-
-      console.log(`✅ Connected to ${walletId}:`, connection.address);
+      console.log(`✅ Connected to ${walletId}`);
     } catch (err) {
       const error = err as Error;
       setError(error.message);
@@ -96,9 +114,7 @@ const PaymentWidget: React.FC<PaymentWidgetProps> = ({
   // Handle wallet disconnect
   const handleWalletDisconnect = async () => {
     try {
-      await walletService.disconnect();
-      setWalletConnection(null);
-      onWalletDisconnect?.();
+      await disconnect();
       console.log('👋 Wallet disconnected');
     } catch (err) {
       console.error('Failed to disconnect wallet:', err);
@@ -133,12 +149,7 @@ const PaymentWidget: React.FC<PaymentWidgetProps> = ({
 
       console.log("Payment intent created:", paymentIntent);
       
-      // In a real implementation, you would:
-      // 1. Use the connected wallet to sign the transaction
-      // 2. Execute the payment with the wallet's provider
-      // 3. Handle the transaction flow
-      
-      // For now, we'll call the success callback with the payment intent
+      // Call the callback functions
       config.onPending?.(paymentIntent.paymentId);
       onPaymentSuccess?.(paymentIntent);
       

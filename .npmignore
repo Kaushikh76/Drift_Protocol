@@ -1,0 +1,38 @@
+# Source files
+src/
+*.ts
+*.tsx
+!dist/
+
+# Backend files (should be in separate package)
+src/server.ts
+src/EventListenerService.ts
+src/supabase-integration.ts
+src/contracts/
+webhook-listener.ts
+
+# Build tools
+rollup.config.js
+tsconfig.json
+.eslintrc.*
+
+# Development files
+.env*
+.DS_Store
+*.log
+node_modules/
+coverage/
+
+# Documentation
+docs/
+examples/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

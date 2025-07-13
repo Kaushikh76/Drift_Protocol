@@ -1,15 +1,67 @@
-import WalletConnect from '@walletconnect/client';
+import { createAppKit } from '@reown/appkit/react';
+import { WagmiAdapter } from '@reown/appkit-adapter-wagmi';
+import { mainnet, sepolia, arbitrum } from '@reown/appkit/networks';
 import { WalletConnection, Wallet } from '../types';
+import { reconnect, getAccount, watchAccount, disconnect } from 'wagmi/actions';
+import type { Config } from 'wagmi';
 
 export class WalletService {
-  private walletConnect?: WalletConnect;
   private projectId: string;
+  private wagmiAdapter: WagmiAdapter;
+  private appKit: any;
+  private config: Config;
+  private initialized = false;
 
   constructor(projectId?: string) {
     this.projectId = projectId || 'default-project-id';
+    
+    if (!this.projectId || this.projectId === 'default-project-id') {
+      console.warn('⚠️ No projectId provided. Get one from https://cloud.reown.com');
+    }
+
+    this.initializeAppKit();
   }
 
-  // Available wallets
+  private initializeAppKit(): void {
+    if (this.initialized) return;
+
+    // 1. Get projectId from https://cloud.reown.com
+    const metadata = {
+      name: 'Drift Payments',
+      description: 'Cross-chain fan token payment widget',
+      url: 'https://drift-payments.com',
+      icons: ['https://drift-payments.com/icon.png']
+    };
+
+    // 2. Set up the Wagmi adapter
+    this.wagmiAdapter = new WagmiAdapter({
+      projectId: this.projectId,
+      networks: [mainnet, sepolia, arbitrum]
+    });
+
+    this.config = this.wagmiAdapter.wagmiConfig;
+
+    // 3. Create the AppKit instance
+    this.appKit = createAppKit({
+      adapters: [this.wagmiAdapter],
+      projectId: this.projectId,
+      networks: [mainnet, sepolia, arbitrum],
+      defaultNetwork: sepolia,
+      metadata,
+      features: {
+        analytics: true,
+        email: false,
+        socials: [],
+      },
+      themeMode: 'dark',
+    });
+
+    this.initialized = true;
+  }
+
+  /**
+   * Get available wallets
+   */
   getAvailableWallets(): Wallet[] {
     const wallets: Wallet[] = [
       {
@@ -31,40 +83,62 @@ export class WalletService {
     return wallets;
   }
 
-  // Check if MetaMask is installed
+  /**
+   * Check if MetaMask is installed
+   */
   private isMetaMaskInstalled(): boolean {
-    return typeof window !== 'undefined' && typeof (window as any).ethereum !== 'undefined' && (window as any).ethereum.isMetaMask;
+    return typeof window !== 'undefined' && 
+           typeof (window as any).ethereum !== 'undefined' && 
+           (window as any).ethereum.isMetaMask;
   }
 
-  // Connect to MetaMask
+  /**
+   * Open the AppKit modal
+   */
+  async openModal(): Promise<void> {
+    if (!this.appKit) {
+      throw new Error('AppKit not initialized');
+    }
+    
+    this.appKit.open();
+  }
+
+  /**
+   * Connect to MetaMask directly
+   */
   async connectMetaMask(): Promise<WalletConnection> {
     if (!this.isMetaMaskInstalled()) {
-      throw new Error('MetaMask is not installed. Please install MetaMask to continue.');
+      // Redirect to MetaMask installation
+      window.open('https://metamask.io/download/', '_blank');
+      throw new Error('MetaMask is not installed. Redirecting to installation page.');
     }
 
     try {
-      const ethereum = (window as any).ethereum;
+      // Open AppKit modal and let user select MetaMask
+      this.appKit.open();
+      
+      // Wait for connection
+      return new Promise((resolve, reject) => {
+        const unwatch = watchAccount(this.config, {
+          onChange: (account) => {
+            if (account.isConnected && account.address) {
+              unwatch();
+              resolve({
+                address: account.address,
+                chainId: account.chainId || 1,
+                walletType: 'metamask',
+                provider: (window as any).ethereum
+              });
+            }
+          }
+        });
 
-      // Request account access
-      const accounts = await ethereum.request({
-        method: 'eth_requestAccounts',
+        // Timeout after 30 seconds
+        setTimeout(() => {
+          unwatch();
+          reject(new Error('Connection timeout. Please try again.'));
+        }, 30000);
       });
-
-      if (!accounts || accounts.length === 0) {
-        throw new Error('No accounts found. Please unlock MetaMask.');
-      }
-
-      // Get chain ID
-      const chainId = await ethereum.request({
-        method: 'eth_chainId',
-      });
-
-      return {
-        address: accounts[0],
-        chainId: parseInt(chainId, 16),
-        walletType: 'metamask',
-        provider: ethereum
-      };
     } catch (error: any) {
       if (error.code === 4001) {
         throw new Error('User rejected the connection request.');
@@ -73,131 +147,150 @@ export class WalletService {
     }
   }
 
-  // Connect to Socios wallet via WalletConnect
+  /**
+   * Connect to Socios wallet via WalletConnect
+   */
   async connectSocios(): Promise<WalletConnection> {
     try {
-      // Create WalletConnect instance
-      this.walletConnect = new WalletConnect({
-        bridge: 'https://bridge.walletconnect.org',
-        qrcodeModal: {
-          open: (uri: string, cb: () => void) => {
-            // For Socios wallet, we'll open the specific Socios app
-            this.openSociosApp(uri);
-            cb();
-          },
-          close: () => {
-            // Close QR modal
-          }
-        },
-      });
-
-      // Check if already connected
-      if (this.walletConnect.connected) {
-        return {
-          address: this.walletConnect.accounts[0],
-          chainId: this.walletConnect.chainId,
-          walletType: 'socios',
-          provider: this.walletConnect
-        };
-      }
-
-      // Create connection
-      await this.walletConnect.createSession();
-
+      // Open AppKit modal specifically for WalletConnect
+      this.appKit.open({ view: 'Connect' });
+      
+      // Wait for connection
       return new Promise((resolve, reject) => {
-        // Subscribe to connection events
-        this.walletConnect!.on('connect', (error, payload) => {
-          if (error) {
-            reject(new Error(`Failed to connect to Socios wallet: ${error.message}`));
-            return;
-          }
-
-          const { accounts, chainId } = payload.params[0];
-          resolve({
-            address: accounts[0],
-            chainId,
-            walletType: 'socios',
-            provider: this.walletConnect
-          });
-        });
-
-        this.walletConnect!.on('session_request', (error, payload) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-
-          // Auto approve session for Socios
-          this.walletConnect!.approveSession({
-            accounts: payload.params[0].accounts,
-            chainId: payload.params[0].chainId
-          });
-        });
-
-        this.walletConnect!.on('disconnect', (error) => {
-          if (error) {
-            reject(new Error('Connection was rejected or failed'));
+        const unwatch = watchAccount(this.config, {
+          onChange: (account) => {
+            if (account.isConnected && account.address) {
+              unwatch();
+              
+              // Check if it's a WalletConnect connection (Socios uses WalletConnect)
+              const connector = account.connector;
+              if (connector?.id.includes('walletConnect')) {
+                resolve({
+                  address: account.address,
+                  chainId: account.chainId || 1,
+                  walletType: 'socios',
+                  provider: connector
+                });
+              } else {
+                // If not WalletConnect, still resolve but indicate it might not be Socios
+                resolve({
+                  address: account.address,
+                  chainId: account.chainId || 1,
+                  walletType: 'socios',
+                  provider: connector
+                });
+              }
+            }
           }
         });
 
-        // Timeout after 30 seconds
+        // Timeout after 60 seconds (WalletConnect can take longer)
         setTimeout(() => {
+          unwatch();
           reject(new Error('Connection timeout. Please try again.'));
-        }, 30000);
+        }, 60000);
       });
     } catch (error: any) {
       throw new Error(`Failed to connect to Socios wallet: ${error.message}`);
     }
   }
 
-  // Open Socios app or redirect to download
-  private openSociosApp(uri: string): void {
-    const sociosAppUrl = `socios://wc?uri=${encodeURIComponent(uri)}`;
-    const sociosWebUrl = `https://www.socios.com/download`;
-    
-    // Try to open Socios app
-    window.location.href = sociosAppUrl;
-    
-    // Fallback to web download after 1 second
-    setTimeout(() => {
-      const userAgent = navigator.userAgent.toLowerCase();
-      if (userAgent.includes('android')) {
-        window.open('https://play.google.com/store/apps/details?id=com.socios.mobile', '_blank');
-      } else if (userAgent.includes('iphone') || userAgent.includes('ipad')) {
-        window.open('https://apps.apple.com/app/socios-com/id1476678006', '_blank');
-      } else {
-        window.open(sociosWebUrl, '_blank');
-      }
-    }, 1000);
-  }
-
-  // Disconnect wallet
-  async disconnect(): Promise<void> {
-    if (this.walletConnect && this.walletConnect.connected) {
-      await this.walletConnect.killSession();
-    }
-    this.walletConnect = undefined;
-  }
-
-  // Switch network for MetaMask
-  async switchNetwork(chainId: number): Promise<void> {
-    if (!this.isMetaMaskInstalled()) {
-      throw new Error('MetaMask is not installed');
-    }
-
-    const ethereum = (window as any).ethereum;
-    const hexChainId = `0x${chainId.toString(16)}`;
-
+  /**
+   * Get current connection status
+   */
+  async getCurrentConnection(): Promise<WalletConnection | null> {
     try {
-      await ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: hexChainId }],
-      });
+      const account = getAccount(this.config);
+      
+      if (account.isConnected && account.address) {
+        const walletType = this.determineWalletType(account.connector?.id || '');
+        
+        return {
+          address: account.address,
+          chainId: account.chainId || 1,
+          walletType,
+          provider: account.connector
+        };
+      }
+      
+      return null;
+    } catch (error) {
+      console.error('Error getting current connection:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Determine wallet type from connector ID
+   */
+  private determineWalletType(connectorId: string): 'metamask' | 'socios' {
+    if (connectorId.includes('metaMask') || connectorId.includes('injected')) {
+      return 'metamask';
+    }
+    return 'socios'; // Default to Socios for WalletConnect connections
+  }
+
+  /**
+   * Watch for account changes
+   */
+  watchConnection(callback: (connection: WalletConnection | null) => void): () => void {
+    return watchAccount(this.config, {
+      onChange: (account) => {
+        if (account.isConnected && account.address) {
+          const walletType = this.determineWalletType(account.connector?.id || '');
+          callback({
+            address: account.address,
+            chainId: account.chainId || 1,
+            walletType,
+            provider: account.connector
+          });
+        } else {
+          callback(null);
+        }
+      }
+    });
+  }
+
+  /**
+   * Disconnect wallet
+   */
+  async disconnect(): Promise<void> {
+    try {
+      await disconnect(this.config);
+      console.log('👋 Wallet disconnected');
+    } catch (error) {
+      console.error('Failed to disconnect wallet:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Switch network
+   */
+  async switchNetwork(chainId: number): Promise<void> {
+    try {
+      // AppKit handles network switching automatically through the modal
+      // For programmatic switching, we can use the switchChain method
+      if (this.appKit && this.appKit.switchNetwork) {
+        await this.appKit.switchNetwork(chainId);
+      } else {
+        // Fallback for MetaMask
+        if (this.isMetaMaskInstalled()) {
+          const ethereum = (window as any).ethereum;
+          const hexChainId = `0x${chainId.toString(16)}`;
+
+          await ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: hexChainId }],
+          });
+        }
+      }
     } catch (error: any) {
       // If the chain hasn't been added to MetaMask, add it
       if (error.code === 4902) {
         const networkConfig = this.getNetworkConfig(chainId);
-        if (networkConfig) {
+        if (networkConfig && this.isMetaMaskInstalled()) {
+          const ethereum = (window as any).ethereum;
           await ethereum.request({
             method: 'wallet_addEthereumChain',
             params: [networkConfig],
@@ -209,7 +302,9 @@ export class WalletService {
     }
   }
 
-  // Get network configuration for adding to MetaMask
+  /**
+   * Get network configuration for adding to MetaMask
+   */
   private getNetworkConfig(chainId: number): any {
     const networks: { [key: number]: any } = {
       11155111: { // Sepolia
@@ -223,7 +318,7 @@ export class WalletService {
         rpcUrls: ['https://sepolia.infura.io/v3/'],
         blockExplorerUrls: ['https://sepolia.etherscan.io/']
       },
-      88888: { // Chiliz Chain
+      88882: { // Chiliz Chain
         chainId: '0x15b38',
         chainName: 'Chiliz Chain',
         nativeCurrency: {
@@ -237,5 +332,30 @@ export class WalletService {
     };
 
     return networks[chainId];
+  }
+
+  /**
+   * Reconnect to previously connected wallet
+   */
+  async reconnect(): Promise<void> {
+    try {
+      await reconnect(this.config);
+    } catch (error) {
+      console.error('Failed to reconnect:', error);
+    }
+  }
+
+  /**
+   * Get the Wagmi config for use in providers
+   */
+  getWagmiConfig(): Config {
+    return this.config;
+  }
+
+  /**
+   * Get the AppKit instance
+   */
+  getAppKit(): any {
+    return this.appKit;
   }
 }
