@@ -2,6 +2,8 @@
 
 A React component library for seamless cross-chain fan token payments with integrated wallet connectivity.
 
+PITCH DECK:https://www.canva.com/design/DAGtC8wkUbI/P1M67mENE3YlsrosQg-Wvw/edit?utm_content=DAGtC8wkUbI&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
+
 ## Installation
 
 ```bash
